@@ -196,10 +196,7 @@ void Engine::noteOn(const EngineSnapshot& s, int pad, float vel, uint32_t token,
     v.toggle = p.mode == PlayMode::Toggle;
     if (p.attackS <= 0.0005f) { v.env = 1.0f; v.stage = p.decayS > 0.0f ? Stage::Decay : Stage::Sustain; }
     else { v.env = 0.0f; v.stage = Stage::Attack; }
-    v.useHp = p.hpHz > 25.0f;
-    v.useLp = p.lpHz < 19000.0f;
-    if (v.useHp) svfCoeffs(p.hpHz, sr, v.hpG, v.hpK);
-    if (v.useLp) svfCoeffs(p.lpHz, sr, v.lpG, v.lpK);
+    // filter coefficients are set per block in renderVoices (pad + source filters, live knobs)
 }
 
 void Engine::noteOff(const EngineSnapshot& s, int pad, uint32_t token)
@@ -223,7 +220,13 @@ void Engine::renderVoices(float* L, float* R, int n, const EngineSnapshot& s)
         const float* inR = a.getReadPointer(a.getNumChannels() > 1 ? 1 : 0);
         const float atk = 1.0f / (float) (std::max(0.0005f, p.attackS) * sr);
         const float dec = p.decayS > 0.0f ? (1.0f - p.sustain) / (float) (p.decayS * sr) : 1.0f;
-        const float gl = p.gainL * v.vel, gr = p.gainR * v.vel;
+        const auto& m = s.sources[(size_t) juce::jlimit(0, kNumSources - 1, v.src)];
+        const float gl = p.gainL * m.gainL * v.vel, gr = p.gainR * m.gainR * v.vel;
+        const float hpHz = std::max(p.hpHz, m.hpHz), lpHz = std::min(p.lpHz, m.lpHz);
+        v.useHp = hpHz > 25.0f;
+        v.useLp = lpHz < 19000.0f;
+        if (v.useHp) svfCoeffs(hpHz, sr, v.hpG, v.hpK);
+        if (v.useLp) svfCoeffs(lpHz, sr, v.lpG, v.lpK);
         for (int i = 0; i < n; ++i)
         {
             int ip = (int) v.pos;

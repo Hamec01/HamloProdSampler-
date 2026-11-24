@@ -28,6 +28,10 @@ struct SourceSlot
     double originOverride = -1.0; // >= 0: user beat-1 position in seconds
     int    keyOverrideRoot = -2;  // -2 = detected, -1 = force "no key", 0..11 = user key
     int    keyOverrideMode = 0;
+    // source lane mix (applied to every pad of this source)
+    float  gainDb = 0.0f;
+    float  pan = 0.0f;
+    float  filter = 0.0f;   // one-knob filter (see filterKnobToHz)
 
     bool empty() const noexcept { return id.isEmpty(); }
 };

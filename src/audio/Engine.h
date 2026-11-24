@@ -76,6 +76,8 @@ struct EngineEvent
 struct EngineSnapshot
 {
     std::array<EnginePad, kNumPads> pads;
+    struct SourceMix { float gainL = 1.0f, gainR = 1.0f, hpHz = 20.0f, lpHz = 20000.0f; };
+    std::array<SourceMix, kNumSources> sources;
     MonoMode mono = MonoMode::Off;
     std::vector<EngineEvent> events; // sorted by tick
     int64_t  loopTicks = kTicksPerBar * 4;

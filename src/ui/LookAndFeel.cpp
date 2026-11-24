@@ -89,6 +89,53 @@ void HPLookAndFeel::drawComboBox(juce::Graphics& g, int w, int h, bool, int, int
     g.fillPath(p);
 }
 
+void HPLookAndFeel::drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h, float pos, float a0, float a1,
+                                     juce::Slider& s)
+{
+    using namespace theme;
+    auto bounds = juce::Rectangle<float>((float) x, (float) y, (float) w, (float) h);
+    const bool caption = !(bool) s.getProperties()["noCaption"] && s.getProperties().contains("caption");
+    auto capArea = caption ? bounds.removeFromBottom(10.0f) : juce::Rectangle<float>();
+    const float d = juce::jmin(bounds.getWidth(), bounds.getHeight()) - 2.0f;
+    const auto c = bounds.getCentre();
+    const float r = d * 0.5f;
+    const auto accent = s.findColour(juce::Slider::rotarySliderFillColourId);
+    const bool bipolar = (bool) s.getProperties()["bipolar"];
+    const float angle = a0 + pos * (a1 - a0);
+    const float mid = a0 + 0.5f * (a1 - a0);
+
+    // track + value arc
+    juce::Path track;
+    track.addCentredArc(c.x, c.y, r - 1.5f, r - 1.5f, 0.0f, a0, a1, true);
+    g.setColour(screen.brighter(0.08f));
+    g.strokePath(track, juce::PathStrokeType(2.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    juce::Path arc;
+    const float from = bipolar ? mid : a0;
+    if (std::abs(angle - from) > 0.01f)
+    {
+        arc.addCentredArc(c.x, c.y, r - 1.5f, r - 1.5f, 0.0f, std::min(from, angle), std::max(from, angle), true);
+        g.setColour(accent.withAlpha(s.isEnabled() ? 1.0f : 0.4f));
+        g.strokePath(arc, juce::PathStrokeType(2.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    }
+    // cap
+    const float cr = r - 5.0f;
+    juce::ColourGradient grad(panelHi.brighter(0.15f), c.x - cr, c.y - cr, body, c.x + cr, c.y + cr, false);
+    g.setGradientFill(grad);
+    g.fillEllipse(c.x - cr, c.y - cr, cr * 2.0f, cr * 2.0f);
+    g.setColour(juce::Colours::black.withAlpha(0.6f));
+    g.drawEllipse(c.x - cr, c.y - cr, cr * 2.0f, cr * 2.0f, 1.0f);
+    // pointer
+    const juce::Point<float> p1 = c.getPointOnCircumference(cr * 0.25f, angle), p2 = c.getPointOnCircumference(cr * 0.9f, angle);
+    g.setColour(s.isMouseOverOrDragging() ? juce::Colours::white : text);
+    g.drawLine({ p1, p2 }, 1.8f);
+    if (caption)
+    {
+        g.setColour(textDim);
+        g.setFont(ui(8.5f, true));
+        g.drawText(s.getProperties()["caption"].toString(), capArea, juce::Justification::centredTop, false);
+    }
+}
+
 void HPLookAndFeel::drawLinearSlider(juce::Graphics& g, int x, int y, int w, int h, float pos, float, float,
                                      juce::Slider::SliderStyle style, juce::Slider& s)
 {

@@ -90,6 +90,9 @@ juce::String Serialization::toJson(const ProjectState& s)
         o->setProperty("originOverride", src.originOverride);
         o->setProperty("keyOverrideRoot", src.keyOverrideRoot);
         o->setProperty("keyOverrideMode", src.keyOverrideMode);
+        o->setProperty("gainDb", src.gainDb);
+        o->setProperty("pan", src.pan);
+        o->setProperty("filter", src.filter);
         sources.add(juce::var(o));
     }
     root->setProperty("sources", sources);
@@ -181,6 +184,9 @@ bool Serialization::fromJson(const juce::String& json, ProjectState& out, juce::
             src.originOverride = get(o, "originOverride", -1.0);
             src.keyOverrideRoot = juce::jlimit(-2, 11, get(o, "keyOverrideRoot", -2));
             src.keyOverrideMode = juce::jlimit(0, 1, get(o, "keyOverrideMode", 0));
+            src.gainDb = juce::jlimit(-60.0f, 12.0f, get(o, "gainDb", 0.0f));
+            src.pan = juce::jlimit(-1.0f, 1.0f, get(o, "pan", 0.0f));
+            src.filter = juce::jlimit(-1.0f, 1.0f, get(o, "filter", 0.0f));
         }
     if (auto* arr = v["slices"].getArray())
         for (const auto& o : *arr)

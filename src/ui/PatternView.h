@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/PluginProcessor.h"
+#include "ui/MixKnob.h"
 #include "ui/Theme.h"
 
 namespace hps
@@ -16,8 +17,11 @@ class PatternView;
 class LaneCanvas : public juce::Component, public juce::DragAndDropTarget, public juce::FileDragAndDropTarget
 {
 public:
-    explicit LaneCanvas(PatternView& o) : owner(o) { setWantsKeyboardFocus(false); }
+    explicit LaneCanvas(PatternView& o);
     void paint(juce::Graphics&) override;
+    void resized() override { layoutKnobs(); }
+    void layoutKnobs();   // the lane mix knobs follow the lane rectangles (drum guide on / off)
+    void updateKnobs();   // values from the project
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
     void mouseUp(const juce::MouseEvent&) override;
@@ -59,6 +63,7 @@ private:
     bool bandAdd = false;
     int dropX = -1;
     int auditionPad = -1;
+    std::array<std::array<std::unique_ptr<MixKnob>, 3>, kNumSources> laneKnobs; // VOL / PAN / FILTER per source
 };
 
 class PatternView : public juce::Component, private juce::Timer

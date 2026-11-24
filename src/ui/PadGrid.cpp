@@ -4,6 +4,62 @@ namespace hps
 {
 int PadButton::flatIndex() const { return grid.proc.ui.bank * kPadsPerBank + indexInBank; }
 
+PadButton::PadButton(PadGrid& g, int index) : grid(g), indexInBank(index)
+{
+    int k = 0;
+    for (auto* knob : { &vol, &pan, &flt })
+    {
+        knob->setCaptionVisible(true);
+        knob->onGestureStart = [this] { grid.proc.project.beginGesture("Pad mix"); };
+        knob->onGestureEnd = [this] { grid.proc.project.endGesture(); };
+        knob->onChange = [this, k](float v)
+        {
+            const int pad = flatIndex();
+            if (!grid.proc.project.state().pads[(size_t) pad].assigned) return;
+            grid.proc.project.edit(padLabel(pad) + (k == 0 ? " volume" : k == 1 ? " pan" : " filter"), [&](ProjectState& s)
+            {
+                auto& ps = s.pads[(size_t) pad].s;
+                if (k == 0) ps.gainDb = v;
+                else if (k == 1) ps.pan = v;
+                else filterKnobToHz(v, ps.hpHz, ps.lpHz);
+            });
+        };
+        addChildComponent(knob);
+        ++k;
+    }
+}
+
+bool PadButton::knobsShown() const
+{
+    return getWidth() >= 118 && getHeight() >= 92 && grid.proc.project.state().pads[(size_t) flatIndex()].assigned;
+}
+
+void PadButton::resized()
+{
+    // bottom-right corner of the pad, next to the badges
+    auto r = getLocalBounds().reduced(6, 8).removeFromBottom(34);
+    auto row = r.removeFromRight(juce::jmin(96, r.getWidth() / 2 + 18));
+    const int w = row.getWidth() / 3;
+    for (auto* knob : { &vol, &pan, &flt }) knob->setBounds(row.removeFromLeft(w));
+    updateKnobs();
+}
+
+void PadButton::updateKnobs()
+{
+    const auto& st = grid.proc.project.state();
+    const auto& p = st.pads[(size_t) flatIndex()];
+    const bool shown = knobsShown();
+    for (auto* knob : { &vol, &pan, &flt })
+    {
+        knob->setVisible(shown);
+        if (shown) knob->setAccent(st.sources[(size_t) p.src].colour);
+    }
+    if (!shown) return;
+    vol.setValueQuietly(p.s.gainDb);
+    pan.setValueQuietly(p.s.pan);
+    flt.setValueQuietly(hzToFilterKnob(p.s.hpHz, p.s.lpHz));
+}
+
 void PadButton::paint(juce::Graphics& g)
 {
     const auto& st = grid.proc.project.state();
@@ -45,7 +101,7 @@ void PadButton::paint(juce::Graphics& g)
         g.drawText("S" + juce::String(p.src + 1), inner.withHeight(15).translated(0, -15), juce::Justification::topRight);
         g.setColour(theme::text.withAlpha(0.85f));
         g.setFont(theme::ui(11.0f));
-        g.drawFittedText(p.name, inner.removeFromTop(28), juce::Justification::topLeft, 2, 0.8f);
+        g.drawFittedText(p.name, inner.removeFromTop(knobsShown() ? 14 : 28), juce::Justification::topLeft, knobsShown() ? 1 : 2, 0.8f);
 
         // badges: mode, repeat, cut group, loop, reverse
         const auto mode = effectivePlayMode(p, st.settings);
@@ -57,6 +113,7 @@ void PadButton::paint(juce::Graphics& g)
         if (p.s.loop) badges.add("LOOP");
         if (p.s.reverse) badges.add("REV");
         auto br = inner.removeFromBottom(14);
+        if (knobsShown()) br = br.withWidth(juce::jmax(40, br.getWidth() - 98));
         g.setFont(theme::mono(9.5f, true));
         for (const auto& b : badges)
         {
@@ -323,7 +380,7 @@ void PadGrid::refresh()
     performBtn.setToggleState(proc.ui.padMode == UiState::PadMode::Perform, juce::dontSendNotification);
     editBtn.setToggleState(proc.ui.padMode == UiState::PadMode::Edit, juce::dontSendNotification);
     updateStrip();
-    for (auto* p : pads) p->repaint();
+    for (auto* p : pads) { p->updateKnobs(); p->repaint(); }
     repaint();
 }
 

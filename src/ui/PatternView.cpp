@@ -11,6 +11,60 @@ constexpr int kAuditionPointer = 5;
 // LaneCanvas: geometry (4 source lanes, overlapping notes stacked in sub-rows)
 // =============================================================================================
 
+LaneCanvas::LaneCanvas(PatternView& o) : owner(o)
+{
+    setWantsKeyboardFocus(false);
+    for (int lane = 0; lane < kNumSources; ++lane)
+        for (int k = 0; k < 3; ++k)
+        {
+            auto knob = std::make_unique<MixKnob>(k == 0 ? MixKnob::Kind::Volume : k == 1 ? MixKnob::Kind::Pan : MixKnob::Kind::Filter);
+            auto* raw = knob.get();
+            raw->onGestureStart = [this] { owner.proc.project.beginGesture("SRC mix"); };
+            raw->onGestureEnd = [this] { owner.proc.project.endGesture(); };
+            raw->onChange = [this, lane, k](float v)
+            {
+                owner.proc.project.edit("SRC " + juce::String(lane + 1) + (k == 0 ? " volume" : k == 1 ? " pan" : " filter"), [&](ProjectState& s)
+                {
+                    auto& src = s.sources[(size_t) lane];
+                    if (k == 0) src.gainDb = v; else if (k == 1) src.pan = v; else src.filter = v;
+                });
+            };
+            addAndMakeVisible(raw);
+            laneKnobs[(size_t) lane][(size_t) k] = std::move(knob);
+        }
+}
+
+void LaneCanvas::layoutKnobs()
+{
+    for (int lane = 0; lane < kNumSources; ++lane)
+    {
+        const auto r = laneRect(lane);
+        const bool fits = r.getHeight() >= 70;
+        auto row = juce::Rectangle<int>(10, r.getY() + 31, kLabelW - 16, 36);
+        for (int k = 0; k < 3; ++k)
+        {
+            auto& knob = *laneKnobs[(size_t) lane][(size_t) k];
+            knob.setVisible(fits);
+            knob.setBounds(row.removeFromLeft(row.getWidth() / (3 - k)).withSizeKeepingCentre(38, 36));
+        }
+    }
+}
+
+void LaneCanvas::updateKnobs()
+{
+    const auto& st = owner.proc.project.state();
+    for (int lane = 0; lane < kNumSources; ++lane)
+    {
+        const auto& s = st.sources[(size_t) lane];
+        auto& k = laneKnobs[(size_t) lane];
+        k[0]->setValueQuietly(s.gainDb);
+        k[1]->setValueQuietly(s.pan);
+        k[2]->setValueQuietly(s.filter);
+        for (auto& knob : k) { knob->setAccent(s.colour); knob->setEnabled(!s.empty()); }
+    }
+    layoutKnobs();
+}
+
 juce::Rectangle<int> LaneCanvas::laneRect(int lane) const
 {
     const bool guide = owner.proc.ui.showGuide && owner.proc.guide.present;
@@ -142,10 +196,15 @@ void LaneCanvas::paint(juce::Graphics& g)
         g.fillRect(lab.removeFromLeft(5));
         auto txt = lab.reduced(6, 4);
         g.setFont(theme::mono(12.0f, true));
-        g.drawText("SRC " + juce::String(lane + 1), txt.removeFromTop(16), juce::Justification::topLeft);
-        g.setFont(theme::ui(11.5f));
+        g.drawText("SRC " + juce::String(lane + 1), txt.removeFromTop(14), juce::Justification::topLeft);
+        g.setFont(theme::ui(11.0f));
         g.setColour(s.empty() ? theme::textDim : theme::text);
-        g.drawFittedText(s.empty() ? "drop audio here" : s.name, txt.removeFromTop(28), juce::Justification::topLeft, 2);
+        g.drawFittedText(s.empty() ? "drop audio here" : s.name, txt.removeFromTop(13), juce::Justification::topLeft, 1, 0.8f);
+        if (r.getHeight() >= 70) // knob well behind VOL / PAN / FILTER
+        {
+            g.setColour(theme::screen.withAlpha(0.55f));
+            g.fillRoundedRectangle(juce::Rectangle<float>(8.0f, (float) r.getY() + 30.0f, (float) kLabelW - 14.0f, 38.0f), 5.0f);
+        }
         const int pad = owner.lanePad(lane);
         if (pad >= 0 && txt.getHeight() >= 12)
         {
@@ -820,6 +879,7 @@ void PatternView::refresh()
     t << "   new: " << padLabel(proc.ui.selectedPad) << ", " << juce::String((double) lastLength / kPPQ, 2) << " beat";
     if (proc.guide.present) t << "  |  guide: " << proc.guide.origin << " " << juce::String(proc.guide.bpm, 1) << " BPM";
     info.setText(t, juce::dontSendNotification);
+    lanes.updateKnobs();
     lanes.repaint();
     repaint();
 }

@@ -114,5 +114,20 @@ inline juce::String padLabel(int flatPad)
     return juce::String::charToString(juce::juce_wchar('A' + bank)) + juce::String(pad + 1).paddedLeft('0', 2);
 }
 
+// One-knob filter: -1 .. 0 = low-pass 200 Hz .. off, 0 .. 1 = off .. high-pass 2 kHz.
+inline void filterKnobToHz(float f, float& hpHz, float& lpHz) noexcept
+{
+    hpHz = 20.0f;
+    lpHz = 20000.0f;
+    if (f < -0.001f) lpHz = 20000.0f * std::pow(0.01f, -f);
+    else if (f > 0.001f) hpHz = 20.0f * std::pow(100.0f, f);
+}
+inline float hzToFilterKnob(float hpHz, float lpHz) noexcept
+{
+    if (lpHz < 19900.0f) return std::log(lpHz / 20000.0f) / std::log(100.0f); // negative: low-pass side
+    if (hpHz > 20.5f) return std::log(hpHz / 20.0f) / std::log(100.0f);
+    return 0.0f;
+}
+
 inline double dbToGain(float db) noexcept { return db <= -60.0f ? 0.0 : std::pow(10.0, db / 20.0); }
 } // namespace hps

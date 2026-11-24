@@ -101,8 +101,11 @@ target_sources(HPSAMPLER PRIVATE
     src/ui/ControlStrip.cpp
     src/ui/PadInspector.cpp
 )
+juce_add_binary_data(HPSAMPLER_Assets SOURCES assets/hamloprod_logo_white.png)
+
 target_link_libraries(HPSAMPLER
     PRIVATE
+        HPSAMPLER_Assets
         HPSAMPLER_Core
         juce::juce_audio_utils
     PUBLIC

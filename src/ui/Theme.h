@@ -55,5 +55,7 @@ public:
     void drawLinearSlider(juce::Graphics&, int x, int y, int w, int h, float pos, float minPos, float maxPos,
                           juce::Slider::SliderStyle, juce::Slider&) override;
     juce::Font getPopupMenuFont() override { return theme::ui(14.0f); }
+    void drawRotarySlider(juce::Graphics&, int x, int y, int w, int h, float pos, float startAngle, float endAngle,
+                          juce::Slider&) override;
 };
 } // namespace hps

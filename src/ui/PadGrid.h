@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/PluginProcessor.h"
+#include "ui/MixKnob.h"
 #include "ui/Theme.h"
 
 namespace hps
@@ -10,8 +11,10 @@ class PadGrid;
 class PadButton : public juce::Component, public juce::DragAndDropTarget, public juce::SettableTooltipClient
 {
 public:
-    PadButton(PadGrid& g, int index) : grid(g), indexInBank(index) {}
+    PadButton(PadGrid& g, int index);
     void paint(juce::Graphics&) override;
+    void resized() override;
+    void updateKnobs();
     void mouseDown(const juce::MouseEvent&) override;
     void mouseUp(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
@@ -31,6 +34,8 @@ private:
     bool dropHover = false;
     bool playing = false;
     bool dragStarted = false;
+    MixKnob vol { MixKnob::Kind::Volume }, pan { MixKnob::Kind::Pan }, flt { MixKnob::Kind::Filter };
+    bool knobsShown() const;
 };
 
 class PadGrid : public juce::Component, private juce::Timer

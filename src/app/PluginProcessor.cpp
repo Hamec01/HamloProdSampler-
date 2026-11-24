@@ -170,6 +170,15 @@ std::unique_ptr<EngineSnapshot> HPSamplerProcessor::buildSnapshot() const
         e.hpHz = p.s.hpHz;
         e.lpHz = p.s.lpHz;
     }
+    for (int i = 0; i < kNumSources; ++i)
+    {
+        const auto& src = st.sources[(size_t) i];
+        auto& m = s->sources[(size_t) i];
+        const float g = (float) dbToGain(src.gainDb);
+        m.gainL = g * juce::jmin(1.0f, 1.0f - src.pan);
+        m.gainR = g * juce::jmin(1.0f, 1.0f + src.pan);
+        filterKnobToHz(src.filter, m.hpHz, m.lpHz);
+    }
     s->mono = st.settings.mono;
     s->loopTicks = (int64_t) st.settings.patternBars * kTicksPerBar;
     for (const auto& ev : st.events)

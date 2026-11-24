@@ -1,5 +1,7 @@
 #include "app/PluginEditor.h"
 
+#include <BinaryData.h>
+
 namespace hps
 {
 void NavButton::paint(juce::Graphics& g)
@@ -317,15 +319,19 @@ void HPSamplerEditor::paint(juce::Graphics& g)
     auto top = getLocalBounds().removeFromTop(48);
     g.setColour(theme::bodyLight);
     g.fillRect(top);
-    // logo (placeholder geometric mark: no brand asset was found in the project)
-    auto logo = top.removeFromLeft(200).reduced(12, 8);
-    g.setColour(theme::accent);
-    juce::Path mark;
-    mark.addTriangle((float) logo.getX(), (float) logo.getBottom(), (float) logo.getX() + 14, (float) logo.getY(), (float) logo.getX() + 28, (float) logo.getBottom());
-    g.fillPath(mark);
+    // HamloProd mark (the white logo of the HamloProd plug-ins) + product name
+    auto logo = top.removeFromLeft(200).reduced(12, 7);
+    static const juce::Image mark = juce::ImageCache::getFromMemory(BinaryData::hamloprod_logo_white_png, BinaryData::hamloprod_logo_white_pngSize);
+    if (mark.isValid())
+    {
+        const auto area = logo.removeFromLeft(30).toFloat();
+        g.setOpacity(0.92f);
+        g.drawImage(mark, area, juce::RectanglePlacement::centred | juce::RectanglePlacement::onlyReduceInSize);
+        g.setOpacity(1.0f);
+    }
     g.setColour(theme::text);
     g.setFont(theme::ui(19.0f, true));
-    g.drawText("HPSAMPLER", logo.withTrimmedLeft(36), juce::Justification::centredLeft);
+    g.drawText("HPSAMPLER", logo.withTrimmedLeft(8), juce::Justification::centredLeft);
     g.setColour(juce::Colours::black.withAlpha(0.6f));
     g.drawHorizontalLine(48, 0, (float) getWidth());
 }
