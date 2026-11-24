@@ -158,6 +158,10 @@ struct SamplerContextSnapshot
 
     int          algorithmVersion = 1;
     juce::String unknownPolicy    = "null";
+
+    // Optional: a local WAV of the MAIN mix (one loop at transport.bpm), written by HPSAMPLER next to its bridge
+    // slot. HPDG can load it as its analysis sample (Sample Analysis -> HPSAMPLER). Never embedded in the JSON.
+    std::optional<juce::String> audioReference;
 };
 
 struct DrumGuideEventDto

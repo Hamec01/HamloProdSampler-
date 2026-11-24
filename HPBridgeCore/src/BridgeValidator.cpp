@@ -325,6 +325,7 @@ juce::String BridgeValidator::toJson(const SamplerContextSnapshot& s)
     an->setProperty("algorithmVersion", s.algorithmVersion);
     an->setProperty("unknownPolicy", s.unknownPolicy);
     root->setProperty("analysis", juce::var(an.release()));
+    root->setProperty("audioReference", s.audioReference.has_value() ? juce::var(*s.audioReference) : juce::var());
 
     return juce::JSON::toString(juce::var(root.release()), false);
 }
@@ -541,6 +542,8 @@ ValidationResult BridgeValidator::fromJson(const juce::String& jsonText, Sampler
         s.algorithmVersion = static_cast<int>(an.getProperty("algorithmVersion", 1));
         s.unknownPolicy    = an.getProperty("unknownPolicy", "null").toString();
     }
+    if (const auto ref = parsed.getProperty("audioReference", {}); ref.isString() && ref.toString().isNotEmpty())
+        s.audioReference = ref.toString();
 
     const auto check = validate(s);
     if (!check.ok) return check;

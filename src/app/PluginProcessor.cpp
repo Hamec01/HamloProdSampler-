@@ -622,7 +622,9 @@ bool HPSamplerProcessor::linkHpdgGuide(const hpbridge::BridgePeerInfo& peer, juc
 void HPSamplerProcessor::sendContextNow()
 {
     if (session == nullptr) return;
-    const auto snap = BridgeAdapter::buildSamplerContext(project, session->getPublishedRevision() + 1, instanceId);
+    auto snap = BridgeAdapter::buildSamplerContext(project, session->getPublishedRevision() + 1, instanceId);
+    const auto wav = writeMainAudioReference();
+    if (wav.existsAsFile()) snap.audioReference = wav.getFullPathName();
     const auto check = hpbridge::BridgeValidator::validate(snap);
     if (!check.ok) { setStatus("Context not sent: " + check.error); contextDirty = false; return; }
     const auto rev = session->publish(hpbridge::kSamplerContextSchemaV1, hpbridge::BridgeValidator::toJson(snap));
@@ -630,6 +632,45 @@ void HPSamplerProcessor::sendContextNow()
     bridgeStatus = "HP Bridge: " + session->getStatusText() + "  |  context rev " + juce::String(rev)
                    + (session->getPartnerAckRevision() > 0 ? "  (HPDG has rev " + juce::String(session->getPartnerAckRevision()) + ")" : juce::String());
     listeners.call([](Listener& l) { l.statusChanged(); });
+}
+
+juce::File HPSamplerProcessor::writeMainAudioReference()
+{
+    const auto& st = project.state();
+    const auto dir = hpbridge::bridgeDirectory().getChildFile("audio")
+                         .getChildFile(juce::String::toHexString((juce::int64) session->getInstanceId()).paddedLeft('0', 16));
+    dir.createDirectory();
+    if (st.events.empty()) return {};
+
+    std::array<const PadSound*, kNumPads> sounds {};
+    for (int i = 0; i < kNumPads; ++i) sounds[(size_t) i] = engine.padSound(i);
+    juce::AudioBuffer<float> out;
+    Engine::renderOffline(*buildSnapshot(), sounds, engineRate, out, 0.0); // exactly one loop: HPDG reads N bars
+
+    // "HPSAMPLER main 83 BPM B min.wav": the tempo / key labels HPDG trusts (still checked against the audio)
+    juce::String name = "HPSAMPLER main " + (std::abs(st.settings.bpm - std::round(st.settings.bpm)) < 0.05
+                                                 ? juce::String(juce::roundToInt(st.settings.bpm)) : juce::String(st.settings.bpm, 1)) + " BPM";
+    if (st.settings.key.known())
+    {
+        static const char* names[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        name << " " << names[st.settings.key.root] << (st.settings.key.mode == 1 ? " maj" : " min");
+    }
+    // write next to the old files, then remove the old ones (HPDG may still be reading the previous revision)
+    const auto file = dir.getChildFile(name + " r" + juce::String(session->getPublishedRevision() + 1) + ".wav");
+    {
+        std::unique_ptr<juce::FileOutputStream> stream(file.createOutputStream());
+        if (stream == nullptr) return {};
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(stream.get(), engineRate, 2, 24, {}, 0));
+        if (w == nullptr) return {};
+        stream.release();
+        w->writeFromAudioSampleBuffer(out, 0, out.getNumSamples());
+    }
+    auto olds = dir.findChildFiles(juce::File::findFiles, false, "*.wav");
+    std::sort(olds.begin(), olds.end(), [](const juce::File& a, const juce::File& b) { return a.getLastModificationTime() > b.getLastModificationTime(); });
+    for (int i = 0; i < olds.size(); ++i)
+        if (olds[i] != file && i >= 2) olds.getReference(i).deleteFile(); // keep the newest two
+    return file;
 }
 
 void HPSamplerProcessor::updateBridgeName()

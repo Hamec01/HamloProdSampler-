@@ -450,8 +450,49 @@ int main(int argc, char** argv)
             guideJson = json;
             return r.ok;
         };
-        s.connectTo(peers.front().id);
+        // HPDG pairs by itself with the only free HPSAMPLER: wait for it instead of connecting from here
+        for (int i = 0; i < 100 && s.getState() != BridgeConnectionState::Connected; ++i)
+        {
+            s.tick(juce::Time::currentTimeMillis());
+            if (i % 10 == 0)
+            {
+                std::cout << "  t=" << i / 10 << "s state=" << s.getStatusText();
+                for (const auto& p : s.discover()) std::cout << " | peer " << p.label() << (p.busy ? " busy" : " free") << (p.alive ? "" : " dead");
+                int samplers = 0;
+                for (const auto& f : bridgeDirectory().findChildFiles(juce::File::findFiles, false, "hpsampler-*.slot")) { juce::ignoreUnused(f); ++samplers; }
+                std::cout << " | sampler slots " << samplers << "\n";
+            }
+            juce::Thread::sleep(100);
+        }
+        std::cout << (s.getState() == BridgeConnectionState::Connected ? "HPDG connected by itself (auto-connect)\n"
+                                                                       : "HPDG did not auto-connect, connecting from the sampler\n");
+        if (s.getState() != BridgeConnectionState::Connected) s.connectTo(peers.front().id);
         SamplerContextSnapshot ctx;
+        {   // a real rendered loop next to the slots, as HPSAMPLER writes it
+            const auto dir = bridgeDirectory().getChildFile("audio").getChildFile("e2e");
+            dir.createDirectory();
+            const auto wav = dir.getChildFile("HPSAMPLER main 92 BPM A min r1.wav");
+            juce::AudioBuffer<float> b(2, (int) (48000 * 60.0 / 92.0 * 8));
+            b.clear();
+            for (int beat = 0; beat < 8; ++beat)
+                for (int i = 0; i < 3000; ++i)
+                {
+                    const float x = 0.8f * std::exp(-i / 500.0f) * (float) std::sin(i * 0.05);
+                    b.setSample(0, (int) (beat * 48000 * 60.0 / 92.0) + i, x);
+                    b.setSample(1, (int) (beat * 48000 * 60.0 / 92.0) + i, x);
+                }
+            wav.deleteFile();
+            if (auto os = std::unique_ptr<juce::FileOutputStream>(wav.createOutputStream()))
+            {
+                juce::WavAudioFormat fmt;
+                if (auto w = std::unique_ptr<juce::AudioFormatWriter>(fmt.createWriterFor(os.get(), 48000.0, 2, 24, {}, 0)))
+                {
+                    os.release();
+                    w->writeFromAudioSampleBuffer(b, 0, b.getNumSamples());
+                }
+            }
+            ctx.audioReference = wav.getFullPathName();
+        }
         ctx.projectId = ctx.samplerInstanceId = "e2e";
         ctx.transport.bpm = 92.0;
         ctx.key.tonicPitchClass = 9; ctx.key.mode = "minor"; ctx.key.confidence = 1.0f;

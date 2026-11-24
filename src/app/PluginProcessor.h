@@ -114,6 +114,9 @@ public:
     bool autoSyncContext = true;   // HPSAMPLER -> HPDG: send the MAIN context when it changes (never regenerates HPDG)
     bool followGuide = true;       // HPDG -> HPSAMPLER: accept new drum guides (off = Freeze Guide)
     void sendContextNow();
+    // One loop of MAIN rendered to %LOCALAPPDATA%\HamloProd\Bridge\audio\<id>\ (tempo + key in the file name, read by
+    // HPDG's label reader). Empty file when the pattern is empty.
+    juce::File writeMainAudioReference();
     juce::String bridgeStatus;
     bool exportSamplerContext(juce::File& written, juce::String& error);
     bool importDrumGuide(const juce::File& f, juce::String& error);
