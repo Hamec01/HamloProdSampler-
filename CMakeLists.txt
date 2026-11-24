@@ -129,7 +129,7 @@ target_include_directories(HPSAMPLER_Shot PRIVATE src)
 # Loads the built VST3 like a host (diagnostics, not shipped)
 add_executable(HPSAMPLER_HostCheck tools/HostCheck.cpp)
 target_link_libraries(HPSAMPLER_HostCheck PRIVATE juce::juce_audio_processors juce::juce_audio_utils)
-target_compile_definitions(HPSAMPLER_HostCheck PRIVATE JUCE_PLUGINHOST_VST3=1 JUCE_STANDALONE_APPLICATION=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
+target_compile_definitions(HPSAMPLER_HostCheck PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1 JUCE_PLUGINHOST_VST3=1 JUCE_STANDALONE_APPLICATION=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
 add_executable(HPSAMPLER_RawVst3Check tools/RawVst3Check.cpp
     ${HPSAMPLER_JUCE_DIR}/modules/juce_audio_processors_headless/format_types/VST3_SDK/pluginterfaces/base/funknown.cpp)
 target_include_directories(HPSAMPLER_RawVst3Check PRIVATE ${HPSAMPLER_JUCE_DIR}/modules/juce_audio_processors_headless/format_types/VST3_SDK)

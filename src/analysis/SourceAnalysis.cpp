@@ -31,12 +31,13 @@ std::vector<float> monoOf(const juce::AudioBuffer<float>& audio, int64_t start, 
     return mono;
 }
 
-juce::AudioFormatManager& formats()
+// A reader from a fresh format manager (no function-level static: it would be destroyed at DLL unload, and it was
+// also shared unsynchronised between the loader thread and the message thread).
+std::unique_ptr<juce::AudioFormatReader> createReader(const juce::File& file)
 {
-    static juce::AudioFormatManager fm;
-    static bool init = false;
-    if (!init) { fm.registerBasicFormats(); init = true; }
-    return fm;
+    juce::AudioFormatManager fm;
+    fm.registerBasicFormats();
+    return std::unique_ptr<juce::AudioFormatReader>(fm.createReaderFor(file));
 }
 
 void computeFeatures(const juce::AudioBuffer<float>& audio, double sr, double tuningCents,
@@ -264,7 +265,7 @@ int64_t SourceAnalyzer::refineAttackStart(const juce::AudioBuffer<float>& audio,
 
 std::shared_ptr<SourceData> SourceAnalyzer::decode(const juce::File& file, const juce::String& id, juce::String& error)
 {
-    std::unique_ptr<juce::AudioFormatReader> reader(formats().createReaderFor(file));
+    auto reader = createReader(file);
     if (reader == nullptr) { error = "Unsupported or unreadable file: " + file.getFileName(); return nullptr; }
     if (reader->lengthInSamples <= 16) { error = "File is empty: " + file.getFileName(); return nullptr; }
     if ((double) reader->lengthInSamples / reader->sampleRate > kMaxSourceSeconds)
@@ -309,7 +310,7 @@ void SourceAnalyzer::analyse(SourceData& data, const juce::File& file, const std
 
     // labels (file name / acid chunk)
     bbg::SampleLabels labels;
-    if (std::unique_ptr<juce::AudioFormatReader> reader { formats().createReaderFor(file) })
+    if (auto reader = createReader(file))
         labels = bbg::SampleLabelReader::read(file, reader->metadataValues);
     else
         labels = bbg::SampleLabelReader::fromName(file.getFileName());

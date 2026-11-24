@@ -66,5 +66,6 @@ private:
     PadInspector inspector { proc };
     juce::Label statusLabel, bridgeLabel;
     std::unique_ptr<juce::FileChooser> chooser;
+    juce::Image logoImage; // owned by the editor (see paint)
 };
 } // namespace hps

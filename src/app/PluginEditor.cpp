@@ -321,7 +321,11 @@ void HPSamplerEditor::paint(juce::Graphics& g)
     g.fillRect(top);
     // HamloProd mark (the white logo of the HamloProd plug-ins) + product name
     auto logo = top.removeFromLeft(200).reduced(12, 7);
-    static const juce::Image mark = juce::ImageCache::getFromMemory(BinaryData::hamloprod_logo_white_png, BinaryData::hamloprod_logo_white_pngSize);
+    // NOT a function-level static: a static image outlives the editor and is destroyed when the host unloads the DLL,
+    // under the loader lock - releasing its Direct2D resources there froze FL Studio (remove plug-in / quit).
+    if (!logoImage.isValid())
+        logoImage = juce::ImageFileFormat::loadFrom(BinaryData::hamloprod_logo_white_png, BinaryData::hamloprod_logo_white_pngSize);
+    const auto& mark = logoImage;
     if (mark.isValid())
     {
         const auto area = logo.removeFromLeft(30).toFloat();
