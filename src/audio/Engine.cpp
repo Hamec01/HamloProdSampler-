@@ -1,0 +1,604 @@
+#include "audio/Engine.h"
+
+#include <algorithm>
+
+namespace hps
+{
+namespace
+{
+inline void svfCoeffs(float fc, double sr, float& g, float& k)
+{
+    fc = juce::jlimit(10.0f, (float) (sr * 0.45), fc);
+    g = std::tan(juce::MathConstants<float>::pi * fc / (float) sr);
+    k = 1.41421356f; // Q = 0.707
+}
+
+// TPT state-variable filter step; returns (lp, hp)
+inline void svfTick(float x, float g, float k, float& ic1, float& ic2, float& lp, float& hp)
+{
+    const float a1 = 1.0f / (1.0f + g * (g + k));
+    const float v3 = x - ic2;
+    const float v1 = a1 * ic1 + g * a1 * v3;
+    const float v2 = ic2 + g * v1;
+    ic1 = 2.0f * v1 - ic1;
+    ic2 = 2.0f * v2 - ic2;
+    lp = v2;
+    hp = x - k * v1 - v2;
+}
+} // namespace
+
+Engine::Engine()
+{
+    for (auto& h : padHits) h.store(0);
+    for (auto& v : padVoices) v.store(0);
+}
+
+void Engine::publishPadSound(int pad, std::unique_ptr<PadSound> s)
+{
+    if (pad < 0 || pad >= kNumPads) return;
+    sounds[(size_t) pad].publish(std::move(s));
+}
+
+void Engine::publishPreviewSource(int slot, std::unique_ptr<PreviewSource> p)
+{
+    if (slot < 0 || slot >= kNumSources) return;
+    previews[(size_t) slot].publish(std::move(p));
+}
+
+void Engine::collectGarbage()
+{
+    snapshot.collect();
+    for (auto& s : sounds) s.collect([](const PadSound& p) { return p.users.load() == 0; });
+    for (auto& p : previews) p.collect();
+}
+
+void Engine::pushCmd(const Cmd& c)
+{
+    const juce::ScopedLock sl(producerLock);
+    int s1, n1, s2, n2;
+    cmdFifo.prepareToWrite(1, s1, n1, s2, n2);
+    if (n1 > 0) cmdBuf[(size_t) s1] = c;
+    else if (n2 > 0) cmdBuf[(size_t) s2] = c;
+    cmdFifo.finishedWrite(n1 + n2);
+}
+
+void Engine::padDown(int pad, float velocity, int pointer)
+{
+    Cmd c; c.type = Cmd::PadOn; c.pad = pad; c.vel = velocity; c.token = kGuiToken | (uint32_t) (pointer & 0xff);
+    pushCmd(c);
+}
+
+void Engine::padUp(int pad, int pointer)
+{
+    Cmd c; c.type = Cmd::PadOff; c.pad = pad; c.token = kGuiToken | (uint32_t) (pointer & 0xff);
+    pushCmd(c);
+}
+
+void Engine::previewRange(int slot, int64_t start, int64_t end, bool loop)
+{
+    Cmd c; c.type = Cmd::Preview; c.slot = slot; c.a = start; c.b = end; c.flag = loop;
+    pushCmd(c);
+}
+
+void Engine::stopPreview() { Cmd c; c.type = Cmd::PreviewStop; pushCmd(c); }
+
+void Engine::setInternalPlaying(bool shouldPlay, bool fromStart)
+{
+    Cmd c; c.type = shouldPlay ? Cmd::Play : Cmd::Stop; c.flag = fromStart;
+    pushCmd(c);
+}
+
+void Engine::panic() { Cmd c; c.type = Cmd::Panic; pushCmd(c); }
+
+bool Engine::popRecordedHit(RecordedHit& out)
+{
+    int s1, n1, s2, n2;
+    recFifo.prepareToRead(1, s1, n1, s2, n2);
+    if (n1 + n2 == 0) return false;
+    out = n1 > 0 ? recBuf[(size_t) s1] : recBuf[(size_t) s2];
+    recFifo.finishedRead(n1 + n2);
+    return true;
+}
+
+void Engine::prepare(double sampleRate, int)
+{
+    sr = sampleRate > 0 ? sampleRate : 44100.0;
+    for (auto& v : voices) if (v.active) freeVoice(v);
+    for (auto& o : offs) o.active = false;
+}
+
+void Engine::freeVoice(Voice& v)
+{
+    if (!v.active) return;
+    if (v.sound) v.sound->users.fetch_sub(1);
+    padVoices[(size_t) v.pad].fetch_sub(1);
+    v.active = false;
+    v.sound = nullptr;
+}
+
+void Engine::fadeVoice(Voice& v, float seconds)
+{
+    if (!v.active || v.stage == Stage::Fade) return;
+    v.stage = Stage::Fade;
+    v.fadeStep = std::max(v.env / (float) (seconds * sr), 1.0e-5f);
+}
+
+void Engine::releaseVoice(Voice& v, const EnginePad& p)
+{
+    if (!v.active || v.stage == Stage::Release || v.stage == Stage::Fade) return;
+    v.stage = Stage::Release;
+    v.relStep = std::max(v.env / (float) (std::max(0.001f, p.releaseS) * sr), 1.0e-6f);
+}
+
+void Engine::noteOn(const EngineSnapshot& s, int pad, float vel, uint32_t token, bool live)
+{
+    juce::ignoreUnused(live);
+    if (pad < 0 || pad >= kNumPads) return;
+    const auto& p = s.pads[(size_t) pad];
+    const PadSound* snd = sounds[(size_t) pad].get();
+    if (!p.assigned || snd == nullptr || snd->audio.getNumSamples() < 2) return;
+    padHits[(size_t) pad].fetch_add(1);
+
+    if (p.mode == PlayMode::Toggle)
+    {
+        bool stopped = false;
+        for (auto& v : voices)
+            if (v.active && v.pad == pad && v.toggle && v.stage != Stage::Release && v.stage != Stage::Fade)
+            {
+                releaseVoice(v, p);
+                stopped = true;
+            }
+        if (stopped) return;
+    }
+
+    // overlap / cut policies (explicit; nothing cuts other pads by default)
+    int sameLayer = 0;
+    for (auto& v : voices)
+    {
+        if (!v.active || v.stage == Stage::Fade) continue;
+        bool cut = false;
+        if (s.mono == MonoMode::All) cut = true;
+        else if (s.mono == MonoMode::PerSource && v.src == p.src) cut = true;
+        if (p.choke > 0 && v.pad != pad && s.pads[(size_t) v.pad].choke == p.choke) cut = true;
+        if (v.pad == pad && p.repeat == RepeatMode::Retrigger) cut = true;
+        if (cut) fadeVoice(v, 0.005f);
+        else if (v.pad == pad) ++sameLayer;
+    }
+    if (sameLayer >= 8) // layer limit per pad: drop the oldest
+    {
+        Voice* oldest = nullptr;
+        for (auto& v : voices)
+            if (v.active && v.pad == pad && v.stage != Stage::Fade && (!oldest || v.order < oldest->order)) oldest = &v;
+        if (oldest) fadeVoice(*oldest, 0.005f);
+    }
+
+    Voice* slot = nullptr;
+    for (auto& v : voices) if (!v.active) { slot = &v; break; }
+    if (slot == nullptr)
+    {
+        for (auto& v : voices) if (v.stage == Stage::Fade && (!slot || v.order < slot->order)) slot = &v;
+        if (slot == nullptr) for (auto& v : voices) if (!slot || v.order < slot->order) slot = &v;
+        freeVoice(*slot);
+    }
+    Voice& v = *slot;
+    v = Voice {};
+    v.active = true;
+    v.pad = pad;
+    v.src = p.src;
+    v.sound = snd;
+    snd->users.fetch_add(1);
+    padVoices[(size_t) pad].fetch_add(1);
+    v.pos = 0.0;
+    v.vel = juce::jlimit(0.0f, 1.0f, vel);
+    v.token = token;
+    v.order = voiceOrder++;
+    v.loop = p.loop && p.mode != PlayMode::OneShot; // OneShot + Loop = single pass (never infinite)
+    v.toggle = p.mode == PlayMode::Toggle;
+    if (p.attackS <= 0.0005f) { v.env = 1.0f; v.stage = p.decayS > 0.0f ? Stage::Decay : Stage::Sustain; }
+    else { v.env = 0.0f; v.stage = Stage::Attack; }
+    v.useHp = p.hpHz > 25.0f;
+    v.useLp = p.lpHz < 19000.0f;
+    if (v.useHp) svfCoeffs(p.hpHz, sr, v.hpG, v.hpK);
+    if (v.useLp) svfCoeffs(p.lpHz, sr, v.lpG, v.lpK);
+}
+
+void Engine::noteOff(const EngineSnapshot& s, int pad, uint32_t token)
+{
+    if (pad < 0 || pad >= kNumPads) return;
+    const auto& p = s.pads[(size_t) pad];
+    if (p.mode != PlayMode::Gate) return; // OneShot plays to the end, Toggle ignores NoteOff
+    for (auto& v : voices)
+        if (v.active && v.pad == pad && v.token == token) releaseVoice(v, p);
+}
+
+void Engine::renderVoices(float* L, float* R, int n, const EngineSnapshot& s)
+{
+    for (auto& v : voices)
+    {
+        if (!v.active) continue;
+        const auto& p = s.pads[(size_t) v.pad];
+        const auto& a = v.sound->audio;
+        const int len = a.getNumSamples();
+        const float* inL = a.getReadPointer(0);
+        const float* inR = a.getReadPointer(a.getNumChannels() > 1 ? 1 : 0);
+        const float atk = 1.0f / (float) (std::max(0.0005f, p.attackS) * sr);
+        const float dec = p.decayS > 0.0f ? (1.0f - p.sustain) / (float) (p.decayS * sr) : 1.0f;
+        const float gl = p.gainL * v.vel, gr = p.gainR * v.vel;
+        for (int i = 0; i < n; ++i)
+        {
+            int ip = (int) v.pos;
+            if (ip >= len)
+            {
+                if (v.loop && v.stage != Stage::Release && v.stage != Stage::Fade) { v.pos = 0.0; ip = 0; }
+                else { freeVoice(v); break; }
+            }
+            switch (v.stage)
+            {
+                case Stage::Attack:  v.env += atk; if (v.env >= 1.0f) { v.env = 1.0f; v.stage = p.decayS > 0.0f ? Stage::Decay : Stage::Sustain; } break;
+                case Stage::Decay:   v.env -= dec; if (v.env <= p.sustain) { v.env = p.sustain; v.stage = Stage::Sustain; } break;
+                case Stage::Sustain: break;
+                case Stage::Release: v.env -= v.relStep; break;
+                case Stage::Fade:    v.env -= v.fadeStep; break;
+            }
+            if (v.env <= 0.0f && (v.stage == Stage::Release || v.stage == Stage::Fade)) { freeVoice(v); break; }
+
+            float xl = inL[ip], xr = inR[ip];
+            if (v.useHp)
+            {
+                float lp, hp;
+                svfTick(xl, v.hpG, v.hpK, v.hp[0].ic1, v.hp[0].ic2, lp, hp); xl = hp;
+                svfTick(xr, v.hpG, v.hpK, v.hp[1].ic1, v.hp[1].ic2, lp, hp); xr = hp;
+            }
+            if (v.useLp)
+            {
+                float lp, hp;
+                svfTick(xl, v.lpG, v.lpK, v.lp[0].ic1, v.lp[0].ic2, lp, hp); xl = lp;
+                svfTick(xr, v.lpG, v.lpK, v.lp[1].ic1, v.lp[1].ic2, lp, hp); xr = lp;
+            }
+            L[i] += xl * v.env * gl;
+            R[i] += xr * v.env * gr;
+            v.pos += 1.0;
+        }
+    }
+}
+
+void Engine::renderPreview(float* L, float* R, int n)
+{
+    if (!previewActive) return;
+    const PreviewSource* ps = previews[(size_t) previewSrc].get();
+    if (ps == nullptr || ps->audio == nullptr) { previewActive = false; previewFrame.store(-1.0); return; }
+    const auto& a = *ps->audio;
+    const int len = a.getNumSamples();
+    const double rate = ps->sampleRate / sr;
+    const float* inL = a.getReadPointer(0);
+    const float* inR = a.getReadPointer(a.getNumChannels() > 1 ? 1 : 0);
+    const float rampStep = 1.0f / (float) (0.004 * sr);
+    for (int i = 0; i < n; ++i)
+    {
+        if (previewStopping) { previewGain -= rampStep; if (previewGain <= 0.0f) { previewActive = false; previewFrame.store(-1.0); return; } }
+        else if (previewGain < 1.0f) previewGain = std::min(1.0f, previewGain + rampStep);
+        if (previewPos >= previewEnd - 1.0 || previewPos >= len - 1)
+        {
+            if (previewLoop) previewPos = previewStart;
+            else { previewStopping = true; previewPos = std::min(previewPos, (double) len - 2); }
+        }
+        // fade the last 3 ms of a non-looping audition
+        float edge = 1.0f;
+        if (!previewLoop)
+        {
+            const double remain = (previewEnd - previewPos) / ps->sampleRate;
+            if (remain < 0.003) edge = (float) juce::jmax(0.0, remain / 0.003);
+        }
+        const int ip = (int) previewPos;
+        const float fr = (float) (previewPos - ip);
+        const int ip1 = std::min(ip + 1, len - 1);
+        L[i] += (inL[ip] + fr * (inL[ip1] - inL[ip])) * previewGain * edge;
+        R[i] += (inR[ip] + fr * (inR[ip1] - inR[ip])) * previewGain * edge;
+        previewPos += rate;
+    }
+    previewFrame.store(previewPos);
+}
+
+void Engine::renderClick(float* L, float* R, int n)
+{
+    if (clickEnv < 1.0e-4f) return;
+    const float decay = std::exp(-1.0f / (float) (0.012 * sr));
+    const float inc = juce::MathConstants<float>::twoPi * clickFreq / (float) sr;
+    for (int i = 0; i < n; ++i)
+    {
+        const float x = std::sin(clickPhase) * clickEnv * 0.35f;
+        clickPhase += inc;
+        clickEnv *= decay;
+        L[i] += x; R[i] += x;
+    }
+}
+
+int64_t Engine::currentLoopTick(int offset) const noexcept
+{
+    const double t = blockStartTick + offset * ticksPerSample;
+    const double L = (double) std::max<int64_t>(1, loopTicks);
+    double m = std::fmod(t, L);
+    if (m < 0) m += L;
+    return (int64_t) m;
+}
+
+void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, const HostTransport& host)
+{
+    const int n = out.getNumSamples();
+    out.clear();
+    if (out.getNumChannels() < 1 || n <= 0) return;
+    const EngineSnapshot* snap = snapshot.get();
+    static const EngineSnapshot empty {};
+    const EngineSnapshot& s = snap != nullptr ? *snap : empty;
+    int nev = 0;
+    auto addEv = [&](int off, uint8_t kind, int pad, float vel, uint32_t token)
+    {
+        if (nev < (int) evs.size()) evs[(size_t) nev++] = { juce::jlimit(0, n - 1, off), kind, pad, vel, token };
+    };
+
+    // ---- commands from the GUI ----
+    {
+        int s1, n1, s2, n2;
+        cmdFifo.prepareToRead(cmdFifo.getNumReady(), s1, n1, s2, n2);
+        auto handle = [&](const Cmd& c)
+        {
+            switch (c.type)
+            {
+                case Cmd::PadOn:  addEv(0, 1, c.pad, c.vel, c.token); break;
+                case Cmd::PadOff: addEv(0, 0, c.pad, 0.0f, c.token); break;
+                case Cmd::Preview:
+                    previewActive = true; previewStopping = false; previewSrc = juce::jlimit(0, kNumSources - 1, c.slot);
+                    previewStart = (double) c.a; previewEnd = (double) std::max(c.a + 2, c.b); previewPos = previewStart;
+                    previewLoop = c.flag; previewGain = 0.0f; previewSlot.store(previewSrc);
+                    break;
+                case Cmd::PreviewStop: if (previewActive) previewStopping = true; break;
+                case Cmd::Play: internalPlaying = true; if (c.flag) internalTick = 0.0; break;
+                case Cmd::Stop: internalPlaying = false; internalTick = 0.0; break;
+                case Cmd::Panic:
+                    for (auto& v : voices) fadeVoice(v, 0.004f);
+                    for (auto& o : offs) o.active = false;
+                    if (previewActive) previewStopping = true;
+                    break;
+            }
+        };
+        for (int i = 0; i < n1; ++i) handle(cmdBuf[(size_t) (s1 + i)]);
+        for (int i = 0; i < n2; ++i) handle(cmdBuf[(size_t) (s2 + i)]);
+        cmdFifo.finishedRead(n1 + n2);
+    }
+
+    // ---- live MIDI (sample-accurate) ----
+    for (const auto meta : midi)
+    {
+        const auto m = meta.getMessage();
+        const int off = meta.samplePosition;
+        if (m.isNoteOn())
+        {
+            const int pad = m.getNoteNumber() - kBaseMidiNote;
+            addEv(off, 1, pad, m.getFloatVelocity(), kMidiToken | ((uint32_t) m.getChannel() << 8) | (uint32_t) m.getNoteNumber());
+        }
+        else if (m.isNoteOff()) // includes NoteOn velocity 0
+        {
+            const int pad = m.getNoteNumber() - kBaseMidiNote;
+            addEv(off, 0, pad, 0.0f, kMidiToken | ((uint32_t) m.getChannel() << 8) | (uint32_t) m.getNoteNumber());
+        }
+        else if (m.isAllNotesOff() || m.isAllSoundOff())
+        {
+            for (auto& v : voices) fadeVoice(v, 0.004f);
+        }
+    }
+
+    // ---- transport ----
+    bool playing = false;
+    double bpm = s.bpm > 20.0 ? s.bpm : 120.0;
+    double startTick = 0.0;
+    if (host.valid && host.playing)
+    {
+        playing = true;
+        bpm = host.bpm > 20.0 ? host.bpm : bpm;
+        startTick = host.ppq * kPPQ;
+        hostDriven.store(true);
+    }
+    else if (internalPlaying)
+    {
+        playing = true;
+        startTick = internalTick;
+        hostDriven.store(false);
+    }
+    hostBpm.store(host.valid ? host.bpm : 0.0);
+    ticksPerSample = bpm / 60.0 * kPPQ / sr;
+    loopTicks = std::max<int64_t>(kPPQ, s.loopTicks);
+    blockStartTick = startTick;
+    const double endTick = startTick + n * ticksPerSample;
+
+    auto releaseSequenced = [&]
+    {
+        for (auto& v : voices)
+            if (v.active && (v.token & kSeqToken) != 0 && s.pads[(size_t) v.pad].mode == PlayMode::Gate)
+                releaseVoice(v, s.pads[(size_t) v.pad]);
+        for (auto& o : offs) o.active = false;
+    };
+    const bool jumped = playing && wasPlaying && std::abs(startTick - lastEndTick) > 4.0;
+    if ((!playing && wasPlaying) || jumped) releaseSequenced();
+
+    if (playing)
+    {
+        // scheduled note-offs
+        for (auto& o : offs)
+            if (o.active && o.tick < endTick)
+            {
+                addEv((int) ((o.tick - startTick) / ticksPerSample), 0, o.pad, 0.0f, o.token);
+                o.active = false;
+            }
+        // pattern events (loop of loopTicks)
+        const double L = (double) loopTicks;
+        const int64_t k0 = (int64_t) std::floor(startTick / L), k1 = (int64_t) std::floor((endTick - 1e-9) / L);
+        for (int64_t k = k0; k <= k1; ++k)
+        {
+            const double base = (double) k * L;
+            for (size_t ei = 0; ei < s.events.size(); ++ei)
+            {
+                const auto& e = s.events[ei];
+                double t = base + (double) e.tick;
+                const int64_t inSixteenth = e.tick % (kPPQ / 2);
+                if (s.swing > 0.0f && std::abs(inSixteenth - kPPQ / 4) <= 8) t += s.swing * (kPPQ / 6.0); // off-beat 1/16 swing
+                if (t < startTick || t >= endTick) continue;
+                const int off = (int) ((t - startTick) / ticksPerSample);
+                const uint32_t token = kSeqToken | (uint32_t) (ei & 0xffff);
+                addEv(off, 1, e.pad, e.velocity, token);
+                if (e.pad >= 0 && e.pad < kNumPads && s.pads[(size_t) e.pad].mode == PlayMode::Gate)
+                {
+                    const double offTick = t + (double) std::max<int64_t>(1, e.length);
+                    if (offTick < endTick) addEv((int) ((offTick - startTick) / ticksPerSample), 0, e.pad, 0.0f, token);
+                    else
+                        for (auto& o : offs) if (!o.active) { o = { true, e.pad, token, offTick }; break; }
+                }
+            }
+        }
+        // metronome clicks on beats
+        if (s.metronome)
+        {
+            const int64_t b0 = (int64_t) std::ceil(startTick / kPPQ), b1 = (int64_t) std::floor((endTick - 1e-9) / kPPQ);
+            for (int64_t b = b0; b <= b1; ++b)
+                addEv((int) (((double) b * kPPQ - startTick) / ticksPerSample), 2, (b % 4) == 0 ? 1 : 0, 0.0f, 0);
+        }
+    }
+
+    // ---- order: by offset, offs before ons at the same offset ----
+    std::sort(evs.begin(), evs.begin() + nev, [](const Ev& a, const Ev& b)
+    {
+        return a.offset != b.offset ? a.offset < b.offset : a.kind < b.kind;
+    });
+
+    float* L = out.getWritePointer(0);
+    float* R = out.getNumChannels() > 1 ? out.getWritePointer(1) : nullptr;
+    float* RR = R != nullptr ? R : L; // mono bus: both channels summed into L
+
+    int pos = 0;
+    const bool rec = recording.load() && playing;
+    for (int i = 0; i <= nev; ++i)
+    {
+        const int until = i < nev ? evs[(size_t) i].offset : n;
+        if (until > pos)
+        {
+            renderVoices(L + pos, RR + pos, until - pos, s);
+            renderClick(L + pos, RR + pos, until - pos);
+            pos = until;
+        }
+        if (i == nev) break;
+        const auto& e = evs[(size_t) i];
+        const bool live = (e.token & kSeqToken) == 0;
+        if (e.kind == 1)
+        {
+            noteOn(s, e.pad, e.vel, e.token, live);
+            if (rec && live && e.pad >= 0 && e.pad < kNumPads && s.pads[(size_t) e.pad].assigned)
+            {
+                int s1, n1, s2, n2;
+                recFifo.prepareToWrite(1, s1, n1, s2, n2);
+                const RecordedHit h { RecordedHit::On, e.pad, currentLoopTick(e.offset), e.vel, e.token };
+                if (n1 > 0) recBuf[(size_t) s1] = h; else if (n2 > 0) recBuf[(size_t) s2] = h;
+                recFifo.finishedWrite(n1 + n2);
+            }
+        }
+        else if (e.kind == 0)
+        {
+            noteOff(s, e.pad, e.token);
+            if (rec && live && e.pad >= 0 && e.pad < kNumPads)
+            {
+                int s1, n1, s2, n2;
+                recFifo.prepareToWrite(1, s1, n1, s2, n2);
+                const RecordedHit h { RecordedHit::Off, e.pad, currentLoopTick(e.offset), 0.0f, e.token };
+                if (n1 > 0) recBuf[(size_t) s1] = h; else if (n2 > 0) recBuf[(size_t) s2] = h;
+                recFifo.finishedWrite(n1 + n2);
+            }
+        }
+        else
+        {
+            clickEnv = 1.0f; clickPhase = 0.0f; clickFreq = e.pad == 1 ? 1500.0f : 1000.0f;
+        }
+    }
+    renderPreview(L, RR, n);
+
+    // master gain + gentle safety clip
+    float peak = 0.0f;
+    const float g = s.masterGain;
+    for (int c = 0; c < std::min(2, out.getNumChannels()); ++c)
+    {
+        float* d = out.getWritePointer(c);
+        for (int i = 0; i < n; ++i)
+        {
+            float x = d[i] * g;
+            if (!std::isfinite(x)) x = 0.0f;
+            if (std::abs(x) > 0.9f) x = std::copysign(0.9f + 0.1f * std::tanh((std::abs(x) - 0.9f) * 10.0f), x);
+            d[i] = x;
+            peak = std::max(peak, std::abs(x));
+        }
+    }
+    for (int c = 2; c < out.getNumChannels(); ++c) out.clear(c, 0, n);
+    outputPeak.store(std::max(peak, outputPeak.load() * 0.9f));
+
+    if (playing)
+    {
+        if (!(host.valid && host.playing)) internalTick = endTick;
+        double m = std::fmod(endTick, (double) loopTicks);
+        if (m < 0) m += (double) loopTicks;
+        playheadTick.store(m);
+    }
+    transportPlaying.store(playing);
+    wasPlaying = playing;
+    lastEndTick = endTick;
+}
+
+void Engine::renderOffline(const EngineSnapshot& snap, const std::array<const PadSound*, kNumPads>& padSounds,
+                           double sampleRate, juce::AudioBuffer<float>& out, double tailSeconds)
+{
+    auto e = std::make_unique<Engine>();
+    e->prepare(sampleRate, 512);
+    e->publishSnapshot(std::make_unique<EngineSnapshot>(snap));
+    for (int i = 0; i < kNumPads; ++i)
+        if (padSounds[(size_t) i] != nullptr)
+        {
+            auto copy = std::make_unique<PadSound>();
+            copy->audio = padSounds[(size_t) i]->audio;
+            copy->sampleRate = padSounds[(size_t) i]->sampleRate;
+            e->publishPadSound(i, std::move(copy));
+        }
+    const double bpm = snap.bpm > 20.0 ? snap.bpm : 120.0;
+    const double loopSeconds = (double) snap.loopTicks / kPPQ * 60.0 / bpm;
+    const int loopFrames = (int) std::ceil(loopSeconds * sampleRate);
+    const int total = loopFrames + (int) (tailSeconds * sampleRate);
+    out.setSize(2, total);
+    out.clear();
+    e->internalPlaying = true;
+    e->internalTick = 0.0;
+    juce::AudioBuffer<float> block(2, 512);
+    juce::MidiBuffer midi;
+    HostTransport none;
+    for (int pos = 0; pos < total; pos += 512)
+    {
+        const int n = std::min(512, total - pos);
+        if (pos + n > loopFrames && e->internalPlaying)
+        {
+            // stop exactly at the loop end: render up to it, then stop
+            const int head = loopFrames - pos;
+            if (head > 0)
+            {
+                juce::AudioBuffer<float> h(2, head);
+                e->process(h, midi, none);
+                for (int c = 0; c < 2; ++c) out.copyFrom(c, pos, h, c, 0, head);
+            }
+            e->internalPlaying = false;
+            const int rest = n - std::max(0, head);
+            if (rest > 0)
+            {
+                juce::AudioBuffer<float> t(2, rest);
+                e->process(t, midi, none);
+                for (int c = 0; c < 2; ++c) out.copyFrom(c, pos + std::max(0, head), t, c, 0, rest);
+            }
+            continue;
+        }
+        block.setSize(2, n, false, false, true);
+        e->process(block, midi, none);
+        for (int c = 0; c < 2; ++c) out.copyFrom(c, pos, block, c, 0, n);
+    }
+}
+} // namespace hps
