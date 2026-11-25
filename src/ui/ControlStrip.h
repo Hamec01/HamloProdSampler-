@@ -30,12 +30,16 @@ public:
     explicit ControlStrip(HPSamplerProcessor& p);
     ~ControlStrip() override;
     void refresh();
+    std::function<void()> onPlay;
+    void mouseDown(const juce::MouseEvent&) override; // right click on METRO
     void paint(juce::Graphics&) override;
     void resized() override;
 
 private:
     void timerCallback() override;
     void nowMenu();
+    void metroMenu();
+    bool rightClick = false;
     void bpmMenu();
     void keyMenu();
     void gridMenu();

@@ -84,7 +84,8 @@ ControlStrip::ControlStrip(HPSamplerProcessor& p) : proc(p)
     }
     recBtn.getProperties().set("led", (juce::int64) theme::rec.getARGB());
     playBtn.getProperties().set("led", (juce::int64) theme::ok.getARGB());
-    playBtn.onClick = [this] { proc.togglePlay(); };
+    playBtn.setTooltip("Plays what is open: MAIN, or the sample of the SRC tab");
+    playBtn.onClick = [this] { if (onPlay) onPlay(); };
     stopBtn.setTooltip("Stops everything in the plug-in (the DAW itself is stopped in the DAW)");
     stopBtn.onClick = [this] { proc.stop(); proc.engine.panic(); };
     recBtn.setTooltip("Record pad / MIDI hits into the pattern (overdub). Starts the transport if needed.");
@@ -98,7 +99,9 @@ ControlStrip::ControlStrip(HPSamplerProcessor& p) : proc(p)
     captureBtn.setWantsKeyboardFocus(false);
     addAndMakeVisible(captureBtn);
     captureBtn.onClick = [this] { proc.captureTake(); };
-    metroBtn.onClick = [this] { proc.project.mutate([](ProjectState& s) { s.settings.metronome = !s.settings.metronome; }); };
+    metroBtn.setTooltip("Metronome, also while a sample plays in its SRC tab. Right-click: sound and volume");
+    metroBtn.addMouseListener(this, false);
+    metroBtn.onClick = [this] { if (std::exchange(rightClick, false)) return; proc.project.mutate([](ProjectState& s) { s.settings.metronome = !s.settings.metronome; }); };
 
     cutLabel.setText("CUT", juce::dontSendNotification);
     cutLabel.setTooltip("Cross-pad cut: OFF = pads overlap freely; PER SRC = a new hit stops the other pads of the same source; ALL = one sound at a time");
@@ -206,8 +209,9 @@ void ControlStrip::timerCallback()
         now.value = n.title; now.sub = n.detail; now.valueColour = col; now.subColour = col.withAlpha(0.85f);
         now.repaint();
     }
-    playBtn.setToggleState(n.who == Who::Main, juce::dontSendNotification);
-    playBtn.setEnabled(n.who != Who::Daw); // the DAW leads
+    const bool src = proc.ui.view >= 0;
+    playBtn.setToggleState(src ? proc.engine.previewFrame.load() >= 0.0 : n.who == Who::Main, juce::dontSendNotification);
+    playBtn.setEnabled(src || n.who != Who::Daw); // in MAIN the DAW leads
     recBtn.setToggleState(proc.isRecordArmed() || (proc.engine.hostRecording.load()
                           && proc.project.state().settings.hostCapture != HostCapture::Off), juce::dontSendNotification);
     if (++captureTick >= 6)
@@ -221,6 +225,34 @@ void ControlStrip::timerCallback()
     }
     const double hb = proc.engine.hostBpm.load();
     if (std::abs(hb - lastHost) > 0.01) { lastHost = hb; refresh(); }
+}
+
+void ControlStrip::mouseDown(const juce::MouseEvent& e)
+{
+    if (e.eventComponent != &metroBtn) return;
+    rightClick = e.mods.isPopupMenu();
+    if (rightClick) metroMenu();
+}
+
+void ControlStrip::metroMenu()
+{
+    const auto& st = proc.project.state().settings;
+    juce::PopupMenu m;
+    m.addSectionHeader("Metronome sound");
+    const char* names[] = { "Click", "Hi-hat", "Rimshot", "Cowbell" };
+    for (int i = 0; i < 4; ++i) m.addItem(1 + i, names[i], true, (int) st.metroSound == i);
+    m.addSectionHeader("Volume");
+    for (int db : { 6, 0, -6, -12 }) m.addItem(100 + db, (db > 0 ? "+" : "") + juce::String(db) + " dB", true, std::abs(st.metroDb - (float) db) < 0.1f);
+    juce::Component::SafePointer<ControlStrip> safe(this);
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&metroBtn), [safe](int r)
+    {
+        if (safe == nullptr || r == 0) return;
+        safe->proc.project.mutate([r](ProjectState& s)
+        {
+            if (r < 10) { s.settings.metroSound = (MetroSound) (r - 1); s.settings.metronome = true; }
+            else s.settings.metroDb = (float) (r - 100);
+        });
+    });
 }
 
 void ControlStrip::nowMenu()

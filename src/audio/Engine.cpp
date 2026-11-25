@@ -323,15 +323,59 @@ void Engine::renderPreview(float* L, float* R, int n)
 void Engine::renderClick(float* L, float* R, int n)
 {
     if (clickEnv < 1.0e-4f) return;
-    const float decay = std::exp(-1.0f / (float) (0.012 * sr));
     const float inc = juce::MathConstants<float>::twoPi * clickFreq / (float) sr;
     for (int i = 0; i < n; ++i)
     {
-        const float x = std::sin(clickPhase) * clickEnv * 0.35f;
+        clickSeed = clickSeed * 1664525u + 1013904223u;
+        const float noise = (float) (int32_t) clickSeed / 2147483648.0f;
+        float x = 0.0f;
+        switch (clickSound)
+        {
+            case MetroSound::Click:   x = std::sin(clickPhase); break;
+            case MetroSound::HiHat:   // noise through two high-pass steps
+            {
+                clickHp = 0.55f * (clickHp + noise - clickPrev);
+                clickPrev = noise;
+                x = clickHp * 1.5f;
+                break;
+            }
+            case MetroSound::Rim:     x = 0.75f * std::sin(clickPhase) + 0.35f * noise * clickEnv; break;
+            case MetroSound::Cowbell: x = 0.4f * ((std::sin(clickPhase) > 0.0f ? 1.0f : -1.0f) + (std::sin(clickPhase * 1.504f) > 0.0f ? 1.0f : -1.0f)); break;
+        }
+        x *= clickEnv * clickGain;
         clickPhase += inc;
-        clickEnv *= decay;
+        clickEnv *= clickDecay;
         L[i] += x; R[i] += x;
     }
+}
+
+void Engine::startClick(bool accent, const EngineSnapshot& s)
+{
+    struct Def { float lo, hi, ms, accentMs, gain; };
+    static constexpr Def defs[] = { { 1000.0f, 1500.0f, 14.0f, 14.0f, 0.5f }, { 0.0f, 0.0f, 22.0f, 55.0f, 0.6f },
+                                    { 1650.0f, 2100.0f, 9.0f, 12.0f, 0.6f }, { 545.0f, 680.0f, 55.0f, 75.0f, 0.4f } };
+    const auto& d = defs[juce::jlimit(0, 3, (int) s.metroSound)];
+    clickSound = s.metroSound;
+    clickFreq = accent ? d.hi : d.lo;
+    clickDecay = std::exp(-1.0f / (float) ((accent ? d.accentMs : d.ms) * 0.001 * sr));
+    clickGain = d.gain * s.metroGain * (accent ? 1.0f : 0.75f);
+    clickEnv = 1.0f;
+    clickPhase = 0.0f;
+}
+
+void Engine::pushMark(int pad, int offset)
+{
+    const PreviewSource* ps = previews[(size_t) previewSrc].get();
+    if (ps == nullptr) return;
+    RecordedHit h;
+    h.type = RecordedHit::Mark;
+    h.pad = pad;
+    h.slot = previewSrc;
+    h.frame = previewPos + offset * ps->sampleRate / sr / ps->ratio;
+    int s1, n1, s2, n2;
+    recFifo.prepareToWrite(1, s1, n1, s2, n2);
+    if (n1 > 0) recBuf[(size_t) s1] = h; else if (n2 > 0) recBuf[(size_t) s2] = h;
+    recFifo.finishedWrite(n1 + n2);
 }
 
 void Engine::pushHit(RecordedHit::Type type, const Ev& e, bool rec)
@@ -391,7 +435,11 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
             switch (c.type)
             {
                 case Cmd::PadOn:
-                    if (c.pad >= 0 && c.pad < kNumPads && s.pads[(size_t) c.pad].assigned) stopPreviewNow();
+                    if (c.pad >= 0 && c.pad < kNumPads)
+                    {
+                        if (s.pads[(size_t) c.pad].assigned) stopPreviewNow();
+                        else if (previewActive && !previewStopping && (c.token & (uint32_t) kAuditionPointer) == 0) pushMark(c.pad, 0);
+                    }
                     addEv(0, 1, c.pad, c.vel, c.token); break;
                 case Cmd::PadOff: addEv(0, 0, c.pad, 0.0f, c.token); break;
                 case Cmd::Preview:
@@ -446,6 +494,7 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
             if (pad < 0 || pad >= kNumPads) continue;
             if (hostDriving) hostMidiNotes.fetch_add(1);
             else if (s.pads[(size_t) pad].assigned) stopPreviewNow();
+            else if (previewActive && !previewStopping) pushMark(pad, off); // slicing while listening
             addEv(off, 1, pad, m.getFloatVelocity(), kMidiToken | ((uint32_t) m.getChannel() << 8) | (uint32_t) m.getNoteNumber());
         }
         else if (m.isNoteOff()) // includes NoteOn velocity 0
@@ -583,6 +632,21 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         }
     }
 
+    // metronome of a source audition: on the beats of the source's grid, at the tempo that is heard
+    if (s.metronome && !playing && previewActive && !previewStopping)
+    {
+        const auto& m = s.sources[(size_t) previewSrc];
+        const PreviewSource* ps = previews[(size_t) previewSrc].get();
+        if (m.beatFrames > 100.0 && ps != nullptr)
+        {
+            const double rate = ps->sampleRate / sr / ps->ratio;
+            const double p0 = (previewPos - m.beatOrigin) / m.beatFrames;
+            const double p1 = (std::min(previewEnd, previewPos + n * rate) - m.beatOrigin) / m.beatFrames;
+            for (int64_t b = (int64_t) std::ceil(p0); (double) b < p1; ++b)
+                addEv((int) (((double) b - p0) * m.beatFrames / rate), 2, (((b % 4) + 4) % 4) == 0 ? 1 : 0, 0.0f, 0);
+        }
+    }
+
     // ---- order: by offset, offs before ons at the same offset ----
     std::sort(evs.begin(), evs.begin() + nev, [](const Ev& a, const Ev& b)
     {
@@ -624,7 +688,7 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         }
         else
         {
-            clickEnv = 1.0f; clickPhase = 0.0f; clickFreq = e.pad == 1 ? 1500.0f : 1000.0f;
+            startClick(e.pad == 1, s);
         }
     }
     renderPreview(L, RR, n);

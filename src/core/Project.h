@@ -105,6 +105,8 @@ struct ProjectSettings
     float      recQuantize = 0.0f;  // 0 = off (keep groove), 1 = hard
     GridDiv    recGrid = GridDiv::Sixteenth;
     bool       metronome = false;
+    MetroSound metroSound = MetroSound::Click;
+    float      metroDb = 0.0f;
     float      masterDb = 0.0f;
     bool       countIn = true;      // 1-2-3-4 before recording
     HostPlays  hostPlays = HostPlays::Both;

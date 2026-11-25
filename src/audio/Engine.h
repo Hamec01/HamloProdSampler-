@@ -79,7 +79,11 @@ struct EngineEvent
 struct EngineSnapshot
 {
     std::array<EnginePad, kNumPads> pads;
-    struct SourceMix { float gainL = 1.0f, gainR = 1.0f, hpHz = 20.0f, lpHz = 20000.0f; };
+    struct SourceMix
+    {
+        float gainL = 1.0f, gainR = 1.0f, hpHz = 20.0f, lpHz = 20000.0f;
+        double beatFrames = 0.0, beatOrigin = 0.0; // grid of the source (source frames): metronome of an audition
+    };
     std::array<SourceMix, kNumSources> sources;
     MonoMode mono = MonoMode::Off;
     std::vector<EngineEvent> events; // sorted by tick
@@ -87,6 +91,8 @@ struct EngineSnapshot
     double   bpm = 120.0;
     float    swing = 0.0f;
     bool     metronome = false;
+    MetroSound metroSound = MetroSound::Click;
+    float    metroGain = 1.0f;
     float    masterGain = 1.0f;
     bool mainNeedsWindow = false;                  // MAIN follows the DAW only while windowOpen
     HostPlays hostPlays = HostPlays::Both;         // what sounds while the DAW plays
@@ -103,7 +109,7 @@ struct PreviewSource
 // What the audio thread reports to the message thread while recording.
 struct RecordedHit
 {
-    enum Type : uint8_t { On, Off } type = On;
+    enum Type : uint8_t { On, Off, Mark } type = On; // Mark: an empty pad was hit while a source is auditioned
     int      pad = 0;
     int64_t  tick = 0;    // position inside the pattern loop (raw, unquantized)
     float    velocity = 0.9f;
@@ -111,6 +117,8 @@ struct RecordedHit
     bool     rec = false;   // recording was on (else: only remembered for CAPTURE)
     bool     host = false;  // the DAW transport was running
     uint32_t pass = 0;      // increments on every transport start
+    int      slot = -1;     // Mark: source and its frame under the playhead
+    double   frame = 0.0;
 };
 
 struct HostTransport
@@ -223,6 +231,8 @@ private:
     void renderClick(float* L, float* R, int n);
     void freeVoice(Voice& v);
     void stopPreviewNow() { if (previewActive) previewStopping = true; }
+    void pushMark(int pad, int offset);
+    void startClick(bool accent, const EngineSnapshot& s);
     void pushHit(RecordedHit::Type type, const Ev& e, bool rec);
     int64_t currentLoopTick(int offset) const noexcept;
 
@@ -272,6 +282,9 @@ private:
 
     // metronome click
     float clickPhase = 0.0f, clickEnv = 0.0f, clickFreq = 1000.0f;
+    float clickGain = 0.5f, clickDecay = 0.99f, clickPrev = 0.0f, clickHp = 0.0f;
+    MetroSound clickSound = MetroSound::Click;
+    uint32_t clickSeed = 0x1234567u;
 
     std::array<Ev, 1024> evs {};
 };

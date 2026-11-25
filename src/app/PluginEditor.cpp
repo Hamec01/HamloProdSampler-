@@ -92,6 +92,12 @@ HPSamplerEditor::HPSamplerEditor(HPSamplerProcessor& p) : juce::AudioProcessorEd
     bridgeLabel.setJustificationType(juce::Justification::centredRight);
 
     padGrid.onOpenInspector = [this] { editPad(proc.ui.selectedPad); };
+    controls.onPlay = [this]
+    {
+        if (proc.ui.view < 0) { proc.togglePlay(); return; }
+        if (proc.engine.previewFrame.load() >= 0.0) sourceView.stopAudition();
+        else { sourceView.grabKeyboardFocus(); sourceView.playFromKeyboard(); }
+    };
     padGrid.onLocate = [this](int pad) { locatePad(pad); };
     inspector.onClose = [this] { openInspector(false); };
     inspector.onScopeChanged = [this] { padGrid.refresh(); if (sourceView.isVisible()) sourceView.refresh(); };

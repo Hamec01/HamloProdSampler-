@@ -159,6 +159,8 @@ juce::String Serialization::toJson(const ProjectState& s)
     so->setProperty("recQuantize", st.recQuantize);
     so->setProperty("recGrid", (int) st.recGrid);
     so->setProperty("metronome", st.metronome);
+    so->setProperty("metroSound", (int) st.metroSound);
+    so->setProperty("metroDb", st.metroDb);
     so->setProperty("masterDb", st.masterDb);
     so->setProperty("countIn", st.countIn);
     so->setProperty("mainNeedsWindow", st.mainNeedsWindow);
@@ -250,6 +252,8 @@ bool Serialization::fromJson(const juce::String& json, ProjectState& out, juce::
     st.recQuantize = juce::jlimit(0.0f, 1.0f, get(so, "recQuantize", st.recQuantize));
     st.recGrid = (GridDiv) juce::jlimit(0, (int) GridDiv::Off, get(so, "recGrid", (int) st.recGrid));
     st.metronome = get(so, "metronome", st.metronome);
+    st.metroSound = (MetroSound) juce::jlimit(0, 3, get(so, "metroSound", (int) st.metroSound));
+    st.metroDb = juce::jlimit(-24.0f, 12.0f, get(so, "metroDb", st.metroDb));
     st.masterDb = juce::jlimit(-60.0f, 12.0f, get(so, "masterDb", st.masterDb));
     st.countIn = get(so, "countIn", st.countIn);
     st.mainNeedsWindow = get(so, "mainNeedsWindow", st.mainNeedsWindow);

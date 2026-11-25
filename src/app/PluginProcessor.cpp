@@ -197,6 +197,7 @@ std::unique_ptr<EngineSnapshot> HPSamplerProcessor::buildSnapshot() const
         m.gainL = g * juce::jmin(1.0f, 1.0f - src.pan);
         m.gainR = g * juce::jmin(1.0f, 1.0f + src.pan);
         filterKnobToHz(src.filter, m.hpHz, m.lpHz);
+        if (const auto g = gridForSource(i); g.valid()) { m.beatFrames = g.framesPerBeat(); m.beatOrigin = g.originFrame(); }
     }
     s->mono = st.settings.mono;
     s->loopTicks = (int64_t) st.settings.patternBars * kTicksPerBar;
@@ -207,6 +208,8 @@ std::unique_ptr<EngineSnapshot> HPSamplerProcessor::buildSnapshot() const
     s->bpm = st.settings.bpm;
     s->swing = st.settings.swing;
     s->metronome = st.settings.metronome;
+    s->metroSound = st.settings.metroSound;
+    s->metroGain = (float) dbToGain(st.settings.metroDb);
     s->masterGain = (float) dbToGain(st.settings.masterDb);
     s->mainNeedsWindow = st.settings.mainNeedsWindow && wrapperType != wrapperType_Standalone;
     s->hostPlays = st.settings.hostPlays;
@@ -256,6 +259,7 @@ void HPSamplerProcessor::syncEngine()
 void HPSamplerProcessor::timerCallback()
 {
     handleRecordedHits();
+    if (markPadIndex >= 0 && engine.previewFrame.load() < 0.0) { markSlot = markPadIndex = -1; markCount = 0; } // the pass is over
     engine.collectGarbage();
     const bool daw = engine.hostDriven.load();
     if (dawWasPlaying && !daw) // the DAW stopped: the pass is over
@@ -685,12 +689,53 @@ bool HPSamplerProcessor::hasSameHit(int pad, int64_t tick) const
     return false;
 }
 
+void HPSamplerProcessor::markPad(int pad, int slot, double frame)
+{
+    const auto d = project.sourceDataForSlot(slot);
+    if (d == nullptr || pad < 0 || pad >= kNumPads || project.state().pads[(size_t) pad].assigned) return;
+    // a finger is never exact: the nearest hit (or grid line, as SNAP says) is meant
+    const int64_t start = juce::jlimit<int64_t>(0, d->numFrames - 64, ChopEngine::snap(*d, (int64_t) frame, ui.snap, gridForSource(slot),
+                                                project.state().settings.grid, (int64_t) (0.06 * d->sampleRate)));
+    const bool through = ui.chopLength == LengthMode::ToEnd;
+    ++markCount;
+    project.edit("Slice " + padLabel(pad), [&](ProjectState& s)
+    {
+        if (!through && markSlot == slot && markPadIndex >= 0) // the cut before this one ends here
+        {
+            auto& prev = s.pads[(size_t) markPadIndex];
+            if (prev.assigned && prev.src == slot && prev.end == d->numFrames && start > prev.start + (int64_t) (0.03 * d->sampleRate))
+            {
+                prev.end = start;
+                for (auto& sl : s.slices) if (sl.id == prev.sliceId) sl.end = start;
+            }
+        }
+        Slice sl { newId(), slot, start, d->numFrames, "Live" };
+        s.slices.push_back(sl);
+        auto& p = s.pads[(size_t) pad];
+        p = Pad {};
+        p.s.chokeGroup = throughCutGroup(s, slot, d->numFrames);
+        p.assigned = true;
+        p.sliceId = sl.id;
+        p.src = slot;
+        p.start = start;
+        p.end = d->numFrames;
+        p.name = "Cut " + juce::String(markCount);
+    });
+    markSlot = slot;
+    markPadIndex = pad;
+    ui.selectedPad = pad;
+    ui.editingPad = -1;
+    setStatus(padLabel(pad) + " cut at " + juce::String((double) start / d->sampleRate, 2) + " s"
+              + (through ? ", plays to the end" : ", ends at the next cut") + ".  Ctrl+Z = undo");
+}
+
 void HPSamplerProcessor::handleRecordedHits()
 {
     RecordedHit h;
     const int64_t loop = (int64_t) project.state().settings.patternBars * kTicksPerBar;
     while (engine.popRecordedHit(h))
     {
+        if (h.type == RecordedHit::Mark) { markPad(h.pad, h.slot, h.frame); continue; }
         // a pass longer than the pattern started under another length
         h.tick %= loop;
         const bool midi = (h.token & Engine::kMidiToken) != 0;

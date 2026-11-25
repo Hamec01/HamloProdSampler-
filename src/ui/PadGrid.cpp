@@ -137,9 +137,10 @@ void PadButton::paint(juce::Graphics& g)
     }
     else
     {
-        g.setColour(theme::textDim.withAlpha(0.6f));
+        const bool mark = grid.proc.engine.previewFrame.load() >= 0.0 && grid.proc.ui.padMode == UiState::PadMode::Perform;
+        g.setColour(mark ? theme::ok.withAlpha(0.8f) : theme::textDim.withAlpha(0.6f));
         g.setFont(theme::ui(10.5f));
-        g.drawFittedText("empty\ndrop a selection", inner, juce::Justification::centred, 2);
+        g.drawFittedText(mark ? "hit = cut here" : "empty\ndrop a selection", inner, juce::Justification::centred, 2);
     }
     if (p.assigned && grid.proc.isPadRendering(pad)) // still the old sound
     {
@@ -581,6 +582,7 @@ void PadGrid::updateStrip()
 
 void PadGrid::timerCallback()
 {
+    if (const bool m = proc.engine.previewFrame.load() >= 0.0; m != marking) { marking = m; for (auto* p : pads) p->repaint(); }
     for (auto* p : pads)
     {
         const int pad = p->flatIndex();

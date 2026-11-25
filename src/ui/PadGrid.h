@@ -75,6 +75,7 @@ private:
     juce::Label cutLabel;
     juce::TextButton cutBtns[5], cutBankBtn { "BANK" }, cutPickBtn { "PICK" };
     void applySweep(int pad);
+    bool marking = false;     // a source is playing: an empty pad takes a cut
     int sweepGroup = -1;      // group being painted, -1 = no sweep
     bool rightClick = false;  // JUCE buttons also "click" with the right button: that one only opens the menu
     juce::TextButton loopBtn { "LOOP" }, revBtn { "REV" }, inspectBtn { "PAD EDIT >" };

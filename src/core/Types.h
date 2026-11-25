@@ -32,6 +32,8 @@ enum class SyncMode : int { Off = 0, Repitch = 1, Stretch = 2 };
 // What sounds while the DAW transport runs.
 enum class HostPlays : int { Both = 0, Main = 1, DawNotes = 2 };
 
+enum class MetroSound : int { Click = 0, HiHat = 1, Rim = 2, Cowbell = 3 };
+
 // When notes played while the DAW runs are written into MAIN by themselves.
 enum class HostCapture : int { Off = 0, WhenRecording = 1, Always = 2 };
 

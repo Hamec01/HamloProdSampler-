@@ -175,6 +175,8 @@ private:
     void onProjectChanged();
     void syncEngine();
     void handleRecordedHits();
+    void markPad(int pad, int slot, double frame); // slicing on the fly: an empty pad was hit during an audition
+    int markSlot = -1, markPadIndex = -1, markCount = 0;
     std::unique_ptr<EngineSnapshot> buildSnapshot() const;
     void mutateNoUndo(const std::function<void(ProjectState&)>& fn);
 

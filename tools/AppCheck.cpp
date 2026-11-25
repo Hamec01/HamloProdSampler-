@@ -341,6 +341,29 @@ int main(int argc, char** argv)
     CHECK(cg(0) == 3 && cg(16) == 3, "whole source, across banks");
     ed->setSize(1100, 700); shot("cut_small.png");
     for (int p : { 1, 2, 3, 16 }) proc->clearPad(p);
+    // ---- 8. PLAY follows the tab, slicing while listening
+    proc->ui.view = 0; proc->ui.chopLength = LengthMode::Found; proc->ui.snap = SnapMode::Off; proc->ui.padMode = UiState::PadMode::Perform;
+    sview.selStart = sview.selEnd = -1; sview.viewStart = 0;
+    ed.reset(); ed.reset(proc->createEditor()); ed->setSize(1440, 880);
+    pg = findChild<PadGrid>(*ed);
+    auto* cs = findChild<ControlStrip>(*ed);
+    deep(*cs, "PLAY")->onClick(); blocks(4);
+    CHECK(proc->engine.previewFrame.load() >= 0.0 && !proc->engine.transportPlaying.load(), "PLAY in a SRC tab plays the sample");
+    blocks(100); proc->triggerPad(4, 0.9f, 0); blocks(100); pump(80);
+    shot("live_marks.png");
+    midi.addEvent(juce::MidiMessage::noteOn(1, 36 + 5, (juce::uint8) 100), 10); blocks(100); pump(80);
+    proc->triggerPad(6, 0.9f, 0); blocks(4); pump(80);
+    {
+        const auto& pp = proc->project.state().pads;
+        CHECK(pp[4].assigned && pp[5].assigned && pp[6].assigned, "pads (mouse and MIDI) cut while the sample plays");
+        CHECK(pp[4].end == pp[5].start && pp[5].end == pp[6].start && pp[6].end == sd->numFrames, "each cut ends at the next one");
+        CHECK(pp[4].start < pp[5].start && proc->engine.previewFrame.load() >= 0.0, "the sample plays on");
+    }
+    proc->project.undo();
+    CHECK(!proc->project.state().pads[6].assigned && proc->project.state().pads[5].end == sd->numFrames, "a cut is one undo step");
+    deep(*cs, "PLAY")->onClick(); blocks(20);
+    CHECK(proc->engine.previewFrame.load() < 0.0, "PLAY again stops it");
+    proc->clearPad(4); proc->clearPad(5);
     proc->project.edit("ev", [](ProjectState& s) { s.settings.patternBars = 2; s.events.clear(); PatternEvent e; e.id = newId(); e.pad = 0; s.events.push_back(e); });
     juce::String err;
     const auto wavF = proc->writeDragFile(false, err), midF = proc->writeDragFile(true, err);

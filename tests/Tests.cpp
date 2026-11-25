@@ -298,6 +298,38 @@ void testWindowClosed()
     CHECK(hits() == h + 1, "the plug-in's own PLAY is not affected");
 }
 
+void testAuditionMetroAndMarks()
+{
+    auto s = baseSnapshot();
+    s.pads[5].assigned = false;
+    s.metronome = true;
+    s.sources[0].beatFrames = 24000.0; s.sources[0].beatOrigin = 0.0;
+    for (auto sound : { MetroSound::Click, MetroSound::HiHat, MetroSound::Rim, MetroSound::Cowbell })
+    {
+        s.metroSound = sound;
+        Rig r(s, 480000);
+        auto p = std::make_unique<PreviewSource>();
+        auto a = std::make_shared<juce::AudioBuffer<float>>(2, 480000); a->clear();
+        p->audio = a; p->sampleRate = kSr;
+        r.e.publishPreviewSource(0, std::move(p));
+        r.e.previewRange(0, 1000, 480000, false);
+        int clicks = 0; bool loud = false; float peak = 0.0f;
+        for (int i = 0; i < 400; ++i) // 102400 frames: beats at 24000, 48000, 72000, 96000
+        {
+            r.block();
+            const float m = r.buf.getMagnitude(0, 256);
+            peak = std::max(peak, m);
+            if (m > 0.05f && !loud) { ++clicks; loud = true; }
+            if (m < 0.01f) loud = false;
+        }
+        CHECK(clicks == 4 && peak > 0.2f && peak < 1.0f, "metronome during an audition, sound " + juce::String((int) sound) + ": " + juce::String(clicks) + " clicks, peak " + juce::String(peak, 2));
+        r.e.padDown(5, 1.0f); r.block();
+        RecordedHit h; bool mark = false;
+        while (r.e.popRecordedHit(h)) if (h.type == RecordedHit::Mark) { mark = h.pad == 5 && h.slot == 0 && std::abs(h.frame - 103400.0) < 300.0; }
+        CHECK(mark && r.e.previewFrame.load() >= 0.0, "an empty pad marks the playhead, the sample plays on");
+    }
+}
+
 void testCountIn()
 {
     auto s = baseSnapshot();
@@ -788,6 +820,7 @@ int main(int argc, char** argv)
     testTransportPriority();
     testDawNotes();
     testWindowClosed();
+    testAuditionMetroAndMarks();
     testCountIn();
     testNoDoubleAfterRecord();
     testRendererSync();
