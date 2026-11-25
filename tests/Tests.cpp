@@ -1,5 +1,6 @@
 // HPSAMPLER automated tests: engine behaviour (pads, overlap, MIDI), sync rendering, chop engine,
 // analysis on synthetic material, persistence, bridge snapshot validation.
+#include <map>
 #include <iostream>
 
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -360,6 +361,43 @@ void testRendererSync()
     auto c = PadRenderer::render(j);
     CHECK(std::abs(c->audio.getNumSamples() - 48000) < 50, "repitch x2: half duration");
     CHECK(std::abs(estimateHz(c->audio, 48000.0) - 880.0) < 10.0, "repitch x2: octave up");
+    {
+        // long sounds: one segmented render shared by several pads
+        const int n = 44100 * 50;
+        auto buf = std::make_shared<juce::AudioBuffer<float>>(2, n);
+        for (int i = 0; i < n; ++i) for (int ch = 0; ch < 2; ++ch) buf->setSample(ch, i, 0.5f * (float) std::sin(2.0 * juce::MathConstants<double>::pi * 300.0 * i / 44100.0));
+        std::map<int, std::unique_ptr<PadSound>> got;
+        PadRenderer r;
+        r.onRendered = [&](int pad, std::unique_ptr<PadSound> s) { got[pad] = std::move(s); };
+        PadRenderJob j; j.audio = buf; j.sourceRate = 44100.0; j.targetRate = 48000.0; j.end = n; j.sync = SyncMode::Off;
+        j.pad = 0; r.submit(j);
+        j.pad = 1; j.start = 44100 * 5; r.submit(j);
+        j.pad = 2; j.end = 44100 * 40; j.reverse = true; r.submit(j);
+        r.finish(60000);
+        CHECK(!r.isBusy() && got.size() == 3 && got[0]->master == got[1]->master, "long pads share one render");
+        double err = 0.0;
+        for (int i = 2000; i < 48000 * 49; i += 7) err = std::max(err, std::abs(0.5 * std::sin(2.0 * juce::MathConstants<double>::pi * 300.0 * i / 48000.0) - (double) got[0]->audio.getSample(0, i)));
+        CHECK(err < 0.003, "segmented render has no seams (as recorded), error " + juce::String(err, 5));
+        CHECK(std::abs(got[1]->audio.getNumSamples() - 48000 * 45) < 3 && got[1]->audio.getSample(0, 1000) == got[0]->audio.getSample(0, 48000 * 5 + 1000), "a pad starts at its place");
+        CHECK(std::abs(got[2]->audio.getNumSamples() - 48000 * 35) < 3 && std::abs(got[2]->audio.getSample(0, 5000) - got[0]->audio.getSample(0, 48000 * 40 - 1 - 5000)) < 0.02f, "reversed long pad");
+        j = {}; j.audio = buf; j.sourceRate = 44100.0; j.targetRate = 48000.0; j.end = n; j.sync = SyncMode::Stretch; j.timeRatio = 1.2;
+        for (float st : { 1.0f, 2.0f, 3.0f }) { j.transpose = st; j.pad = 0; r.submit(j); } // fast changes: only the last one counts
+        r.finish(60000);
+        const auto& a = got[0]->audio;
+        float lo = 1.0f;
+        for (int w = 48000; w + 9600 < a.getNumSamples() - 48000; w += 2400) lo = std::min(lo, a.getRMSLevel(0, w, 4800));
+        CHECK(std::abs(estimateHz(a, 48000.0) - 300.0 * std::pow(2.0, 3.0 / 12.0)) < 12.0 && std::abs(a.getNumSamples() - 48000 * 60) < 3, "stretched long pad: pitch and length");
+        CHECK(lo > 0.2f, "no hole at the seams, lowest RMS " + juce::String(lo, 3));
+    }
+    {
+        auto buf = std::make_shared<juce::AudioBuffer<float>>(2, 44100);
+        for (int i = 0; i < 44100; ++i) for (int ch = 0; ch < 2; ++ch) buf->setSample(ch, i, (float) std::sin(2.0 * juce::MathConstants<double>::pi * 5000.0 * i / 44100.0));
+        PadRenderJob rj; rj.audio = buf; rj.sourceRate = 44100.0; rj.targetRate = 48000.0; rj.start = 0; rj.end = 44100; rj.sync = SyncMode::Off;
+        const auto rs = PadRenderer::render(rj);
+        double err = 0.0;
+        for (int i = 1000; i < 46000; ++i) err = std::max(err, std::abs((double) rs->audio.getSample(0, i) - std::sin(2.0 * juce::MathConstants<double>::pi * 5000.0 * i / 48000.0)));
+        CHECK(err < 0.002, "44.1 -> 48 kHz: exact and without delay, error " + juce::String(err, 5));
+    }
 
     j.sync = SyncMode::Stretch; j.end = 600; j.timeRatio = 1.25; j.transpose = 2.0f; // very short slice
     auto d = PadRenderer::render(j);
@@ -526,6 +564,41 @@ void testAnalysisAndChop()
     CHECK(sl.size() == 8 && std::abs((double) (sl[1].start - sl[0].start) - 26460.0) < 2.0, "beat slicer: 1 beat each");
     const auto rg = ChopEngine::equalRegions(1000, 9000, 4);
     CHECK(rg.size() == 4 && rg[0].start == 1000 && rg[3].end == 9000, "equal regions cover the selection");
+    {
+        Engine e; e.prepare(48000.0, 512);
+        auto snap = std::make_unique<EngineSnapshot>();
+        snap->pads[0].assigned = true;
+        e.publishSnapshot(std::move(snap));
+        auto snd = std::make_unique<PadSound>();
+        snd->audio.setSize(2, 1000);
+        for (int c = 0; c < 2; ++c) juce::FloatVectorOperations::fill(snd->audio.getWritePointer(c), 0.5f, 1000);
+        snd->fadeIn = 400; snd->fadeOut = 200;
+        e.publishPadSound(0, std::move(snd));
+        e.padDown(0, 1.0f, 0);
+        juce::AudioBuffer<float> b1(2, 512), b2(2, 512); juce::MidiBuffer mb; HostTransport h;
+        b1.clear(); b2.clear();
+        e.process(b1, mb, h); e.process(b2, mb, h);
+        const float mid = b1.getSample(0, 450);
+        CHECK(mid > 0.1f && std::abs(b1.getSample(0, 200) / mid - 0.5f) < 0.02f && std::abs(b2.getSample(0, 900 - 512) / mid - 0.5f) < 0.02f,
+              "shared render: the voice fades in and out");
+    }
+    double beats = 0;
+    const auto eg = ChopEngine::equalRegionsOnGrid(26460 * 4 - 700, 26460 * 12 + 900, 4, d->numFrames, g, &beats);
+    bool onBeat = !eg.empty();
+    for (const auto& c : eg) onBeat = onBeat && c.start % 26460 == 0;
+    CHECK(onBeat && std::abs(beats - 2.0) < 1e-9, "equal regions on grid: musical length, starts on beats");
+    std::vector<ChopCandidate> lc { { 100, 200, 1.0f, "a" }, { 500, 900, 1.0f, "b" } };
+    ChopEngine::applyLength(lc, LengthMode::ToEnd, 5000);
+    CHECK(lc[0].end == 5000 && lc[1].end == 5000, "length: to the end");
+    ChopEngine::applyLength(lc, LengthMode::ToNext, 5000);
+    CHECK(lc[0].end == 500 && lc[1].end == 900, "length: to the next chop");
+    lc[0].manualEnd = true; lc[0].foundEnd = 150;
+    ChopEngine::applyLength(lc, LengthMode::ToEnd, 5000);
+    CHECK(lc[0].end == 150, "a dragged end is kept");
+    ChopEngine::applyLength(lc, LengthMode::Found, 5000);
+    CHECK(lc[1].end == 900, "length: found length comes back");
+    CHECK(std::abs(60.0 / ChopEngine::tapPeriod({ 0.0, 0.76, 1.49, 2.26, 3.75, 4.50 }) - 80.0) < 1.0, "tap tempo: jitter and a missed beat");
+    CHECK(ChopEngine::tapPeriod({ 0.0, 0.5 }) == 0.0, "tap tempo needs more taps");
     const auto snapped = ChopEngine::snap(*d, 26460 + 500, SnapMode::Grid, g, GridDiv::Quarter, 5000);
     CHECK(std::abs((double) snapped - 26460.0) < 2.0, "grid snap to beat");
 }

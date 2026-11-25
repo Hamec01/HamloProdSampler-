@@ -86,6 +86,15 @@ HPSamplerEditor::HPSamplerEditor(HPSamplerProcessor& p) : juce::AudioProcessorEd
     padGrid.onOpenInspector = [this] { editPad(proc.ui.selectedPad); };
     padGrid.onLocate = [this](int pad) { locatePad(pad); };
     inspector.onClose = [this] { openInspector(false); };
+    inspector.onScopeChanged = [this] { padGrid.refresh(); if (sourceView.isVisible()) sourceView.refresh(); };
+    padGrid.onEditBank = [this](int bank)
+    {
+        proc.ui.bank = bank;
+        proc.ui.editBank = bank;
+        proc.ui.editingPad = -1;
+        openInspector(true);
+        projectChanged();
+    };
     inspector.onLocate = [this](int pad) { editPad(pad); };
     patternView.onShowSource = [this](int slot) { showView(slot); };
 
@@ -133,6 +142,7 @@ void HPSamplerEditor::showView(int view)
 void HPSamplerEditor::openInspector(bool open)
 {
     proc.ui.inspectorOpen = open;
+    if (!open && proc.ui.editBank >= 0) { proc.ui.editBank = -1; padGrid.refresh(); }
     inspector.setVisible(open);
     if (open) inspector.refresh();
     resized();
@@ -141,6 +151,8 @@ void HPSamplerEditor::openInspector(bool open)
 void HPSamplerEditor::editPad(int pad)
 {
     proc.ui.selectedPad = pad;
+    proc.ui.editBank = -1; // one pad
+    padGrid.refresh();
     openInspector(true);
     if (!proc.project.state().pads[(size_t) pad].assigned) return;
     proc.ui.editingPad = pad;
@@ -318,6 +330,7 @@ bool HPSamplerEditor::keyPressed(const juce::KeyPress& k)
         return true;
     }
     if (k.getModifiers().isCtrlDown() && (k.getKeyCode() == 'Y' || k.getKeyCode() == 'y')) { proc.project.redo(); return true; }
+    if (k == juce::KeyPress::escapeKey && proc.ui.padMode == UiState::PadMode::Cut) { proc.ui.padMode = UiState::PadMode::Perform; padGrid.refresh(); return true; }
     if (k == juce::KeyPress::spaceKey) return handleSpace();
     // a click on a pad moves the keyboard focus away from the view: its keys still work
     if (proc.ui.view >= 0) { if (!sourceView.hasKeyboardFocus(true) && sourceView.keyPressed(k)) return true; }

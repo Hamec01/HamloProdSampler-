@@ -141,6 +141,8 @@ public:
 
 private:
     void timerCallback() override;
+    void mouseDown(const juce::MouseEvent&) override { resultDragged = false; }
+    void mouseDrag(const juce::MouseEvent&) override; // RESULT: drag the wave into the DAW
     void exportWav();
     void exportMidi();
     void showHelp();
@@ -153,7 +155,32 @@ private:
     juce::Label zoomLabel, rowLabel;
     juce::ComboBox barsBox;
     juce::TextButton guideBtn { "DRUM GUIDE" }, quantBtn { "QUANTIZE REC" }, clearBtn { "CLEAR" };
-    juce::TextButton wavBtn { "EXPORT WAV" }, midiBtn { "EXPORT MIDI" }, renderBtn { "RENDER" };
+    // Click = save as, drag = the file goes straight into the DAW.
+    struct DragFileButton : juce::TextButton
+    {
+        using juce::TextButton::TextButton;
+        std::function<juce::File()> makeFile;
+        bool dragged = false;
+        void mouseDown(const juce::MouseEvent& e) override { dragged = false; juce::TextButton::mouseDown(e); }
+        void mouseDrag(const juce::MouseEvent& e) override
+        {
+            if (dragged) return;
+            if (e.getDistanceFromDragStart() < 6) { juce::TextButton::mouseDrag(e); return; }
+            dragged = true;
+            setState(juce::Button::buttonNormal);
+            startFileDrag(*this, makeFile);
+        }
+        void mouseUp(const juce::MouseEvent& e) override
+        {
+            if (dragged) { setState(juce::Button::buttonNormal); return; } // a drag is not a click
+            juce::TextButton::mouseUp(e);
+        }
+    };
+    static void startFileDrag(juce::Component& from, const std::function<juce::File()>& makeFile);
+    juce::File dragFile(bool midi);
+    bool resultDragged = false;
+    DragFileButton wavBtn { "DRAG WAV" }, midiBtn { "DRAG MIDI" };
+    juce::TextButton renderBtn { "RENDER" };
     juce::Label info;
     std::unique_ptr<juce::FileChooser> chooser;
     std::vector<PatternEvent> clipboard;

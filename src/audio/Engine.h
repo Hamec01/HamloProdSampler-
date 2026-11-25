@@ -49,6 +49,8 @@ struct PadSound
     juce::AudioBuffer<float> audio; // 2 channels
     double sampleRate = 44100.0;
     uint64_t renderKey = 0;
+    int fadeIn = 0, fadeOut = 0; // frames, applied by the voice (shared renders; other sounds have them baked in)
+    std::shared_ptr<juce::AudioBuffer<float>> master; // set when `audio` only points into a render shared by several pads
     mutable std::atomic<int> users { 0 };
 };
 
@@ -94,6 +96,7 @@ struct PreviewSource
 {
     std::shared_ptr<const juce::AudioBuffer<float>> audio;
     double sampleRate = 44100.0;
+    double ratio = 1.0; // buffer frames per source frame (a source rendered at the project tempo; positions stay source frames)
 };
 
 // What the audio thread reports to the message thread while recording.

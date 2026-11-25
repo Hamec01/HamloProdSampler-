@@ -232,6 +232,7 @@ void Engine::renderVoices(float* L, float* R, int n, const EngineSnapshot& s)
         const int len = a.getNumSamples();
         const float* inL = a.getReadPointer(0);
         const float* inR = a.getReadPointer(a.getNumChannels() > 1 ? 1 : 0);
+        const int fadeIn = v.sound->fadeIn, fadeOut = v.sound->fadeOut;
         const float atk = 1.0f / (float) (std::max(0.0005f, p.attackS) * sr);
         const float dec = p.decayS > 0.0f ? (1.0f - p.sustain) / (float) (p.decayS * sr) : 1.0f;
         const auto& m = s.sources[(size_t) juce::jlimit(0, kNumSources - 1, v.src)];
@@ -260,6 +261,8 @@ void Engine::renderVoices(float* L, float* R, int n, const EngineSnapshot& s)
             if (v.env <= 0.0f && (v.stage == Stage::Release || v.stage == Stage::Fade)) { freeVoice(v); break; }
 
             float xl = inL[ip], xr = inR[ip];
+            if (ip < fadeIn) { const float f = (float) ip / (float) fadeIn; xl *= f; xr *= f; }
+            if (len - ip <= fadeOut) { const float f = (float) (len - ip - 1) / (float) fadeOut; xl *= f; xr *= f; }
             if (v.useHp)
             {
                 float lp, hp;
@@ -286,7 +289,7 @@ void Engine::renderPreview(float* L, float* R, int n)
     if (ps == nullptr || ps->audio == nullptr) { previewActive = false; previewFrame.store(-1.0); return; }
     const auto& a = *ps->audio;
     const int len = a.getNumSamples();
-    const double rate = ps->sampleRate / sr;
+    const double rate = ps->sampleRate / sr / ps->ratio; // source frames per output sample
     const float* inL = a.getReadPointer(0);
     const float* inR = a.getReadPointer(a.getNumChannels() > 1 ? 1 : 0);
     const float rampStep = 1.0f / (float) (0.004 * sr);
@@ -294,20 +297,21 @@ void Engine::renderPreview(float* L, float* R, int n)
     {
         if (previewStopping) { previewGain -= rampStep; if (previewGain <= 0.0f) { previewActive = false; previewFrame.store(-1.0); return; } }
         else if (previewGain < 1.0f) previewGain = std::min(1.0f, previewGain + rampStep);
-        if (previewPos >= previewEnd - 1.0 || previewPos >= len - 1)
+        if (previewPos >= previewEnd - 1.0 || previewPos * ps->ratio >= len - 1)
         {
             if (previewLoop) previewPos = previewStart;
-            else { previewStopping = true; previewPos = std::min(previewPos, (double) len - 2); }
+            else { previewStopping = true; previewPos = std::max(0.0, std::min(previewPos, ((double) len - 2) / ps->ratio)); }
         }
         // fade the last 3 ms of a non-looping audition
         float edge = 1.0f;
         if (!previewLoop)
         {
-            const double remain = (previewEnd - previewPos) / ps->sampleRate;
+            const double remain = (previewEnd - previewPos) * ps->ratio / ps->sampleRate;
             if (remain < 0.003) edge = (float) juce::jmax(0.0, remain / 0.003);
         }
-        const int ip = (int) previewPos;
-        const float fr = (float) (previewPos - ip);
+        const double bp = previewPos * ps->ratio;
+        const int ip = std::min((int) bp, len - 1);
+        const float fr = (float) (bp - ip);
         const int ip1 = std::min(ip + 1, len - 1);
         L[i] += (inL[ip] + fr * (inL[ip1] - inL[ip])) * previewGain * edge;
         R[i] += (inR[ip] + fr * (inR[ip1] - inR[ip])) * previewGain * edge;
@@ -663,8 +667,11 @@ void Engine::renderOffline(const EngineSnapshot& snap, const std::array<const Pa
         if (padSounds[(size_t) i] != nullptr)
         {
             auto copy = std::make_unique<PadSound>();
-            copy->audio = padSounds[(size_t) i]->audio;
+            auto& shared = const_cast<juce::AudioBuffer<float>&>(padSounds[(size_t) i]->audio); // only read; outlives this call
+            copy->audio.setDataToReferTo(shared.getArrayOfWritePointers(), shared.getNumChannels(), shared.getNumSamples());
             copy->sampleRate = padSounds[(size_t) i]->sampleRate;
+            copy->fadeIn = padSounds[(size_t) i]->fadeIn;
+            copy->fadeOut = padSounds[(size_t) i]->fadeOut;
             e->publishPadSound(i, std::move(copy));
         }
     const double bpm = snap.bpm > 20.0 ? snap.bpm : 120.0;

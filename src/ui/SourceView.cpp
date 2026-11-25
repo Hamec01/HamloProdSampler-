@@ -71,6 +71,7 @@ void WaveCanvas::drawGrid(juce::Graphics& g, juce::Rectangle<int> area, bool rul
     const auto gr = owner.grid();
     const auto& v = owner.view();
     const double pxPerFrame = getWidth() / std::max(1.0, v.viewLen);
+    if (!ruler && !owner.proc.ui.showGrid) return;
     if (!gr.valid())
     {
         if (!ruler) return;
@@ -99,6 +100,7 @@ void WaveCanvas::drawGrid(juce::Graphics& g, juce::Rectangle<int> area, bool rul
     const bool drawSub = sub > 0 && subBeats < 1.0 && pxPerBeat * subBeats >= 7.0;
     const bool drawBeats = pxPerBeat >= 5.0;
     const int barStep = pxPerBeat * 4 >= 40 ? 1 : (pxPerBeat * 16 >= 40 ? 4 : 16);
+    const auto lineCol = gr.tentative ? theme::accent : juce::Colours::white;
     g.setFont(theme::mono(11.0f, true));
     for (double b = first; b <= last; b += 1.0)
     {
@@ -116,20 +118,30 @@ void WaveCanvas::drawGrid(juce::Graphics& g, juce::Rectangle<int> area, bool rul
             }
             else
             {
-                g.setColour(juce::Colours::white.withAlpha(0.22f));
-                g.drawVerticalLine((int) x, (float) area.getY(), (float) area.getBottom());
+                if ((((bar - 1) / barStep) % 2 + 2) % 2 == 1) // every other bar is shaded
+                {
+                    g.setColour(lineCol.withAlpha(0.035f));
+                    g.fillRect(juce::Rectangle<float>(x, (float) area.getY(), (float) (pxPerBeat * 4 * barStep), (float) area.getHeight()));
+                }
+                g.setColour(lineCol.withAlpha(0.6f));
+                if (gr.tentative)
+                {
+                    const float dash[] = { 5.0f, 4.0f };
+                    g.drawDashedLine({ x, (float) area.getY(), x, (float) area.getBottom() }, dash, 2, 1.0f);
+                }
+                else g.drawVerticalLine((int) x, (float) area.getY(), (float) area.getBottom());
             }
         }
         else if (drawBeats && !isBar)
         {
-            g.setColour(juce::Colours::white.withAlpha(ruler ? 0.4f : 0.09f));
+            g.setColour(lineCol.withAlpha(ruler ? 0.5f : 0.30f));
             g.drawVerticalLine((int) x, ruler ? (float) area.getBottom() - 8 : (float) area.getY(), (float) area.getBottom());
         }
         if (drawSub)
             for (double s = subBeats; s < 0.999; s += subBeats)
             {
                 const float sx = (float) frameToX(gr.originFrame() + (b + s) * fpb);
-                g.setColour(juce::Colours::white.withAlpha(ruler ? 0.25f : 0.04f));
+                g.setColour(lineCol.withAlpha(ruler ? 0.25f : 0.11f));
                 g.drawVerticalLine((int) sx, ruler ? (float) area.getBottom() - 4 : (float) area.getY(), (float) area.getBottom());
             }
     }
@@ -244,9 +256,6 @@ void WaveCanvas::paint(juce::Graphics& g)
     if (v.viewLen <= 0.0) { v.viewStart = 0; v.viewLen = (double) d->numFrames; }
 
     auto wave = waveArea();
-    // background grid
-    drawGrid(g, wave, false);
-
     // pad regions tint
     for (int i = 0; i < kNumPads; ++i)
     {
@@ -268,6 +277,8 @@ void WaveCanvas::paint(juce::Graphics& g)
         drawSpectrogram(g, top, *d);
         drawWave(g, wave.withTrimmedTop(top.getHeight()), *d);
     }
+
+    drawGrid(g, wave, false); // over the wave: it has to be seen
 
     // onset ticks (small, at the bottom of the wave area)
     g.setColour(theme::accent.withAlpha(0.45f));
@@ -345,7 +356,10 @@ void WaveCanvas::paint(juce::Graphics& g)
         const float x0 = (float) frameToX((double) c.start), x1 = (float) frameToX((double) c.end);
         if (x1 < 0 || x0 > getWidth()) continue;
         const bool sel = v.selectedCandidate == i;
-        auto r = juce::Rectangle<float>(x0, (float) cb.getY() + 2, std::max(3.0f, x1 - x0 - 1), (float) cb.getHeight() - 4);
+        float xEnd = x1; // chops that overlap (TO END) are drawn up to the next one, with an arrow
+        for (const auto& o : v.candidates) if (o.start > c.start) xEnd = std::min(xEnd, (float) frameToX((double) o.start));
+        const bool through = xEnd < x1 - 1.0f || c.end >= d->numFrames;
+        auto r = juce::Rectangle<float>(x0, (float) cb.getY() + 2, std::max(3.0f, xEnd - x0 - 1), (float) cb.getHeight() - 4);
         g.setColour(theme::accent.withAlpha(sel ? 0.55f : 0.08f + 0.22f * c.score));
         g.fillRect(r);
         g.setColour(theme::accent.withAlpha(0.9f));
@@ -354,10 +368,35 @@ void WaveCanvas::paint(juce::Graphics& g)
         juce::Path dashed; juce::PathStrokeType(1.0f).createDashedStroke(dashed, outline, dashes, 2);
         g.fillPath(dashed);
         g.setColour(theme::text);
-        if (r.getWidth() > 16) g.drawText(juce::String(i + 1), r.toNearestInt(), juce::Justification::centred);
+        if (r.getWidth() > 16) g.drawText(juce::String(i + 1) + (through && r.getWidth() > 34 ? " >" : ""), r.toNearestInt(), juce::Justification::centred);
         // faint cut line on the waveform
         g.setColour(theme::accent.withAlpha(0.35f));
         g.drawVerticalLine((int) x0, (float) wave.getY(), (float) wave.getBottom());
+    }
+
+    // what the grid is, and how the sample is fitted to the project
+    if (owner.proc.ui.showGrid && d->analysis.ready && owner.editingPad() < 0)
+    {
+        const auto gr = owner.grid();
+        juce::String tag;
+        if (gr.tentative) tag << "GRID ~" << juce::String(gr.bpm, 1) << " BPM  -  a guess, not used for tempo fit: TAP or SRC BPM";
+        else if (gr.valid())
+        {
+            const double proj = st.settings.bpm;
+            tag << "GRID " << juce::String(gr.bpm, 1) << " BPM";
+            if (st.settings.sync == SyncMode::Off) tag << "  |  SYNC OFF: pads keep this tempo";
+            else tag << "  ->  pads play at " << juce::String(proj, 1) << " BPM  (x" << juce::String(proj / gr.bpm, 2) << ")";
+        }
+        if (tag.isNotEmpty())
+        {
+            g.setFont(theme::ui(11.0f, true));
+            const int w = juce::jmin(wave.getWidth() - 8, (int) tag.length() * 6 + 24);
+            const auto box = juce::Rectangle<int>(wave.getRight() - w - 4, wave.getBottom() - 34, w, 18);
+            g.setColour(theme::screen.withAlpha(0.85f));
+            g.fillRoundedRectangle(box.toFloat(), 3.0f);
+            g.setColour(gr.tentative ? theme::accent : theme::ok);
+            g.drawFittedText(tag, box.reduced(6, 0), juce::Justification::centred, 1, 0.8f);
+        }
     }
 
     // audition playhead
@@ -508,6 +547,7 @@ void WaveCanvas::mouseDown(const juce::MouseEvent& e)
         {
             drag = e.mods.isShiftDown() ? Drag::MoveSel : Drag::ToPad;
             dragOffset = (int64_t) f - v.selStart;
+            anchorFrame = snapped(f);
             return;
         }
     }
@@ -585,7 +625,7 @@ void WaveCanvas::mouseDrag(const juce::MouseEvent& e)
             {
                 auto& c = v.candidates[(size_t) dragCandidate];
                 if (drag == Drag::CandStart) c.start = juce::jlimit<int64_t>(0, c.end - 1, snapped(f));
-                else c.end = juce::jlimit<int64_t>(c.start + 1, d->numFrames, snapped(f));
+                else { c.end = juce::jlimit<int64_t>(c.start + 1, d->numFrames, snapped(f)); c.foundEnd = c.end; c.manualEnd = true; }
                 v.selStart = c.start; v.selEnd = c.end;
             }
             break;
@@ -609,6 +649,12 @@ void WaveCanvas::mouseUp(const juce::MouseEvent& e)
             {
                 v.selStart = v.selEnd = -1;
                 v.selectedCandidate = -1;
+                if (owner.editingPad() >= 0) { owner.proc.ui.editingPad = -1; owner.refresh(); v.selStart = v.selEnd = -1; }
+                if (owner.proc.ui.chopLength == LengthMode::ToEnd && anchorFrame < d->numFrames - 1)
+                {
+                    owner.setSelection(anchorFrame, d->numFrames, true); // from here to the end: Enter puts it on a pad
+                    break;
+                }
                 owner.selectionChanged();
                 owner.auditionFrom(snapped(xToFrame(e.x)));
             }
@@ -623,10 +669,17 @@ void WaveCanvas::mouseUp(const juce::MouseEvent& e)
             if (owner.proc.ui.autoAudition) owner.auditionSelection();
             break;
         case Drag::CandStart: case Drag::CandEnd:
+            owner.candidatesEdited();
             if (owner.proc.ui.autoAudition) owner.auditionSelection();
             break;
         case Drag::ToPad:
-            if (!moved) owner.auditionSelection(); // click inside the selection = listen to it
+            if (!moved && owner.proc.ui.chopLength == LengthMode::ToEnd && owner.editingPad() < 0 && v.selEnd >= d->numFrames
+                && anchorFrame < d->numFrames - 1)
+            {
+                v.selectedCandidate = -1;
+                owner.setSelection(anchorFrame, d->numFrames, true);
+            }
+            else if (!moved) owner.auditionSelection(); // click inside the selection = listen to it
             break;
         default: break;
     }
@@ -711,7 +764,7 @@ SourceView::SourceView(HPSamplerProcessor& p) : proc(p)
     addAndMakeVisible(canvas);
     for (auto* b : { &loadBtn, &clearBtn, &anchorBtn, &bpmBtn, &keyBtn, &halfBtn, &doubleBtn, &waveBtn, &specBtn, &splitBtn,
                      &runBtn, &mapBtn, &acceptBtn, &clearCandBtn, &sMinus, &sPlus, &eMinus, &ePlus, &zoomSelBtn, &zoomAllBtn,
-                     &loopBtn, &autoBtn, &assignBtn, &assignModeBtn })
+                     &loopBtn, &autoBtn, &assignBtn, &assignModeBtn, &tapBtn, &gridBtn, &hearBtn, &cutBtn, &mapMenuBtn })
     {
         addAndMakeVisible(*b);
         b->setWantsKeyboardFocus(false);
@@ -770,28 +823,49 @@ SourceView::SourceView(HPSamplerProcessor& p) : proc(p)
     addAndMakeVisible(amount);
     amount.setSliderStyle(juce::Slider::LinearHorizontal);
     amount.setTextBoxStyle(juce::Slider::TextBoxRight, false, 40, 20);
-    toolBox.onChange = [this] { updateHeader(); };
+    toolBox.onChange = [this] { updateHeader(); chopParamChanged(); };
+    focusBox.onChange = [this] { chopParamChanged(); };
+    amount.onValueChange = [this] { chopParamChanged(); };
+    addAndMakeVisible(lengthBox);
+    lengthBox.addItem("LEN: FOUND", 1);
+    lengthBox.addItem("LEN: TO NEXT", 2);
+    lengthBox.addItem("LEN: TO END", 3);
+    lengthBox.setTooltip("How long each chop sounds: the length that was found, up to the next chop, or on to the end of the sample. "
+                         "With TO END a click on the wave also means 'from here to the end'.");
+    lengthBox.onChange = [this] { setLengthMode((LengthMode) (lengthBox.getSelectedId() - 1)); };
+    cutBtn.setClickingTogglesState(true);
+    cutBtn.setTooltip("Pads that play to the end cut each other (they get one CUT GROUP)");
+    cutBtn.onClick = [this] { proc.ui.cutThrough = cutBtn.getToggleState(); };
+    mapMenuBtn.setTooltip("Where the chops go: free pads or replacing pads");
+    mapMenuBtn.onClick = [this]
+    {
+        juce::PopupMenu m;
+        const int bank = proc.ui.bank * kPadsPerBank, sel = proc.ui.selectedPad;
+        const bool any = !view().candidates.empty();
+        m.addItem(1, "Free pads from " + padLabel(bank), any);
+        m.addItem(2, "From " + padLabel(bank) + ", replacing what is there", any);
+        if (sel != bank) m.addItem(3, "From " + padLabel(sel) + " (selected pad), replacing", any);
+        m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&mapMenuBtn), [this, bank, sel](int r)
+        {
+            if (r == 1) mapToPads(bank, false);
+            else if (r == 2) mapToPads(bank, true);
+            else if (r == 3) mapToPads(sel, true);
+        });
+    };
+    tapBtn.setTriggeredOnMouseDown(true);
+    tapBtn.setTooltip("Tap the beat of this sample: click here or press T on every beat (4 taps or more). Stop tapping and the tempo is set. Esc cancels.");
+    tapBtn.onClick = [this] { grabKeyboardFocus(); tap(); };
+    gridBtn.setClickingTogglesState(true);
+    gridBtn.setTooltip("Show the tempo grid on the wave");
+    gridBtn.onClick = [this] { proc.ui.showGrid = gridBtn.getToggleState(); canvas.repaint(); };
+    hearBtn.setClickingTogglesState(true);
+    hearBtn.setTooltip("Listen to the sample the way pads will play it: at the project tempo and key");
+    hearBtn.onClick = [this] { proc.ui.hearFitted = hearBtn.getToggleState(); proc.updateFit(); refresh(); };
     runBtn.onClick = [this] { runChopTool(); };
-    mapBtn.setTooltip("Put all candidates on the next free pads (asks first, Undo-able). Occupied pads are never overwritten.");
+    mapBtn.setTooltip("Put all chops on the free pads of this bank and on (one click, Undo-able). Occupied pads are never overwritten.");
     mapBtn.onClick = [this]
     {
-        auto& v = view();
-        if (v.candidates.empty()) return;
-        int free = 0;
-        for (const auto& p : proc.project.state().pads) if (!p.assigned) ++free;
-        const int from = proc.ui.bank * kPadsPerBank;
-        const int n = (int) v.candidates.size();
-        juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon, "Map candidates to pads",
-            juce::String(n) + " candidate(s) -> free pads from " + padLabel(from) + " (" + juce::String(free) + " free). Occupied pads are skipped.",
-            "Map", "Cancel", this, juce::ModalCallbackFunction::create([this, from](int r)
-            {
-                if (r != 1) return;
-                const int done = proc.mapCandidatesToEmptyPads(slot, view().candidates, from);
-                proc.setStatus(juce::String(done) + " chop(s) mapped to pads");
-                view().candidates.clear();
-                view().selectedCandidate = -1;
-                refresh();
-            }));
+        mapToPads(proc.ui.bank * kPadsPerBank, false);
     };
     acceptBtn.setTooltip("Keep the candidates as slices of this source (markers) without using pads");
     acceptBtn.onClick = [this]
@@ -804,7 +878,15 @@ SourceView::SourceView(HPSamplerProcessor& p) : proc(p)
         });
         proc.setStatus(juce::String((int) v.candidates.size()) + " slice(s) accepted");
     };
-    clearCandBtn.onClick = [this] { view().candidates.clear(); view().selectedCandidate = -1; refresh(); };
+    clearCandBtn.onClick = [this]
+    {
+        auto& v = view();
+        if (v.selectedCandidate >= 0) v.selStart = v.selEnd = -1; // it was the candidate, not a hand-made selection
+        v.candidates.clear();
+        v.selectedCandidate = -1;
+        v.rangeFrom = v.rangeTo = -1;
+        refresh();
+    };
 
     sMinus.setTooltip("Start earlier (1 ms; Shift 10 ms; Alt 1 frame)");
     sPlus.setTooltip("Start later");
@@ -848,7 +930,9 @@ SourceView::SourceView(HPSamplerProcessor& p) : proc(p)
         proc.ui.padMode = UiState::PadMode::Assign;
         proc.setStatus("ASSIGN: click a pad to put the selection on it (Esc = cancel)");
     };
-    for (auto* b : { &doneEditBtn, &playPadBtn }) { b->setWantsKeyboardFocus(false); addChildComponent(*b); }
+    toEndBtn.setTooltip("This pad plays on to the end of the sample (again: back to its chopped length)");
+    toEndBtn.onClick = [this] { if (const int pad = editingPad(); pad >= 0) { proc.togglePadToEnd(pad); refresh(); } };
+    for (auto* b : { &doneEditBtn, &playPadBtn, &toEndBtn }) { b->setWantsKeyboardFocus(false); addChildComponent(*b); }
     addChildComponent(editBanner);
     editBanner.setFont(theme::ui(13.0f, true));
     editBanner.setColour(juce::Label::backgroundColourId, theme::screen.withAlpha(0.85f));
@@ -896,6 +980,7 @@ SourceView::~SourceView() { stopTimer(); }
 
 void SourceView::setSlot(int s)
 {
+    if (tapArmed) finishTap(false);
     slot = juce::jlimit(0, kNumSources - 1, s);
     markFrame = -1;
     refresh();
@@ -915,6 +1000,8 @@ void SourceView::refresh()
     const bool editing = editingPad() >= 0;
     doneEditBtn.setVisible(editing);
     playPadBtn.setVisible(editing);
+    toEndBtn.setVisible(editing);
+    if (editing) toEndBtn.setToggleState(proc.padPlaysToEnd(editingPad()), juce::dontSendNotification);
     editBanner.setVisible(editing);
     if (editing)
     {
@@ -969,6 +1056,8 @@ void SourceView::updateHeader()
         {
             const auto sync = st.settings.sync;
             if (sync == SyncMode::Stretch) inf << "   |  pads stretch " << juce::String(bpm, 1) << " -> " << juce::String(st.settings.bpm, 1) << " BPM";
+            if (sync == SyncMode::Stretch && st.settings.bpm > 20.0)
+                inf << " (" << juce::String((double) d->numFrames / d->sampleRate * bpm / st.settings.bpm, 1) << " s)";
             else if (sync == SyncMode::Repitch) inf << "   |  pads repitch to " << juce::String(st.settings.bpm, 1) << " BPM";
             if (key.known() && st.settings.key.known() && sync == SyncMode::Stretch)
             {
@@ -976,7 +1065,7 @@ void SourceView::updateHeader()
                 inf << ", key " << (k > 0 ? "+" : "") << juce::String(k) << " st";
             }
         }
-        else if (d->analysis.ready) inf << "   |  no reliable BPM: set it (click SRC BPM) or drag the beat-1 flag";
+        else if (d->analysis.ready) inf << "   |  no reliable BPM: TAP it or click SRC BPM";
         if (d->analysis.labelInfo.isNotEmpty()) inf << "   |  " << d->analysis.labelInfo;
     }
     info.setText(inf, juce::dontSendNotification);
@@ -985,14 +1074,17 @@ void SourceView::updateHeader()
     (view().display == 0 ? waveBtn : view().display == 1 ? specBtn : splitBtn).setToggleState(true, juce::dontSendNotification);
     const bool have = d != nullptr;
     for (auto* b : { &clearBtn, &anchorBtn, &bpmBtn, &keyBtn, &halfBtn, &doubleBtn, &runBtn, &mapBtn, &acceptBtn, &clearCandBtn,
-                     &sMinus, &sPlus, &eMinus, &ePlus, &zoomSelBtn, &zoomAllBtn, &assignBtn, &assignModeBtn })
+                     &sMinus, &sPlus, &eMinus, &ePlus, &zoomSelBtn, &zoomAllBtn, &assignBtn, &assignModeBtn,
+                     &tapBtn, &hearBtn, &cutBtn, &mapMenuBtn })
         b->setEnabled(have || b == &clearBtn ? !s.empty() : false);
 
     // chop tool parameters
     const int tool = toolBox.getSelectedId();
-    focusBox.clear(juce::dontSendNotification);
-    focusBox.setVisible(tool == 1 || tool == 2 || tool == 5);
-    if (tool == 1)
+    const bool newTool = tool != lastTool;
+    focusBox.setVisible(tool != 4);
+    if (newTool) focusBox.clear(juce::dontSendNotification); // the choice is kept until the tool changes
+    if (!newTool) {}
+    else if (tool == 1)
     {
         focusBox.addItem("HYBRID", 1); focusBox.addItem("ATTACK", 2); focusBox.addItem("TONAL", 3); focusBox.addItem("PHRASE", 4);
         focusBox.setSelectedId(1, juce::dontSendNotification);
@@ -1011,8 +1103,8 @@ void SourceView::updateHeader()
     }
     else
     {
+        if (tool == 3) { focusBox.addItem("ON GRID", 1); focusBox.addItem("BY TIME", 2); focusBox.setSelectedId(1, juce::dontSendNotification); }
         amount.setRange(tool == 3 ? 2 : 0, tool == 3 ? 32 : 100, 1);
-
         amountLabel.setText(tool == 3 ? "parts" : "sens", juce::dontSendNotification);
         runBtn.setButtonText("CHOP");
     }
@@ -1025,9 +1117,22 @@ void SourceView::updateHeader()
     if (tool == 5) amount.setVisible(false);
 
     const auto& v = view();
-    candInfo.setText(v.candidates.empty() ? juce::String("range: selection, or the whole file")
-                                          : juce::String((int) v.candidates.size()) + " candidates - click to hear, drag edges, right-click to drop",
+    candInfo.setText(v.candidates.empty() ? chopHint() : juce::String((int) v.candidates.size()) + " chops: click = hear, drag edges, right-click = drop",
                      juce::dontSendNotification);
+    candInfo.setTooltip(chopHint());
+    toolBox.setTooltip(chopHint());
+    runBtn.setTooltip(chopHint());
+    lengthBox.setSelectedId((int) proc.ui.chopLength + 1, juce::dontSendNotification);
+    cutBtn.setVisible(proc.ui.chopLength == LengthMode::ToEnd);
+    cutBtn.setToggleState(proc.ui.cutThrough, juce::dontSendNotification);
+    gridBtn.setToggleState(proc.ui.showGrid, juce::dontSendNotification);
+    const bool canFit = bpm > 20.0 && st.settings.sync != SyncMode::Off;
+    hearBtn.setButtonText(!proc.ui.hearFitted ? "HEAR: ORIGINAL"
+                          : !canFit ? (st.settings.sync == SyncMode::Off ? juce::String("SYNC IS OFF") : juce::String("SET SRC BPM TO FIT"))
+                          : "HEAR: " + juce::String(st.settings.bpm, 1) + " BPM");
+    hearBtn.setToggleState(proc.ui.hearFitted, juce::dontSendNotification);
+    if (!tapArmed) tapBtn.setButtonText("TAP");
+    tapBtn.setToggleState(tapArmed, juce::dontSendNotification);
     mapBtn.setButtonText("-> PADS (" + juce::String((int) v.candidates.size()) + ")");
     selectionChanged();
     snapBox.setSelectedId(proc.ui.snap == SnapMode::Transient ? 1 : proc.ui.snap == SnapMode::Grid ? 2 : proc.ui.snap == SnapMode::ZeroCross ? 3 : 4,
@@ -1049,7 +1154,7 @@ void SourceView::selectionChanged()
     const double sr = d->sampleRate;
     juce::String t = "IN " + fmtTime(v.selStart / sr) + "  OUT " + fmtTime(v.selEnd / sr) + "  LEN " + juce::String((v.selEnd - v.selStart) / sr, 3) + " s";
     const auto g = grid();
-    if (g.valid()) t << "  =  " << juce::String((v.selEnd - v.selStart) / g.framesPerBeat(), 2) << " beats";
+    if (g.valid() && !g.tentative) t << "  =  " << juce::String((v.selEnd - v.selStart) / g.framesPerBeat(), 2) << " beats";
     selInfo.setText(t, juce::dontSendNotification);
 }
 
@@ -1065,10 +1170,11 @@ void SourceView::resized()
 {
     auto r = getLocalBounds().reduced(6, 4);
     auto top = r.removeFromTop(30);
-    title.setBounds(top.removeFromLeft(220).withTrimmedLeft(4));
+    title.setBounds(top.removeFromLeft(juce::jlimit(70, 220, top.getWidth() - 945)).withTrimmedLeft(4));
     bpmBtn.setBounds(top.removeFromLeft(170).reduced(2));
     halfBtn.setBounds(top.removeFromLeft(30).reduced(2));
     doubleBtn.setBounds(top.removeFromLeft(30).reduced(2));
+    tapBtn.setBounds(top.removeFromLeft(tapArmed ? 104 : 54).reduced(2));
     keyBtn.setBounds(top.removeFromLeft(150).reduced(2));
     anchorBtn.setBounds(top.removeFromLeft(190).reduced(2));
     clearBtn.setBounds(top.removeFromRight(62).reduced(2));
@@ -1077,7 +1183,10 @@ void SourceView::resized()
     splitBtn.setBounds(top.removeFromRight(54).reduced(2));
     specBtn.setBounds(top.removeFromRight(50).reduced(2));
     waveBtn.setBounds(top.removeFromRight(54).reduced(2));
-    info.setBounds(r.removeFromTop(18).withTrimmedLeft(4));
+    auto infoRow = r.removeFromTop(22);
+    hearBtn.setBounds(infoRow.removeFromRight(160).reduced(2, 1));
+    gridBtn.setBounds(infoRow.removeFromRight(58).reduced(2, 1));
+    info.setBounds(infoRow.withTrimmedLeft(4));
 
     auto sel = r.removeFromBottom(30);
     auto chop = r.removeFromBottom(30);
@@ -1087,6 +1196,7 @@ void SourceView::resized()
         auto b = r.withTrimmedTop(24 + 18).removeFromTop(26).reduced(4, 1);
         doneEditBtn.setBounds(b.removeFromRight(70));
         playPadBtn.setBounds(b.removeFromRight(90).withTrimmedRight(4));
+        toEndBtn.setBounds(b.removeFromRight(80).withTrimmedRight(4));
         editBanner.setBounds(b.removeFromLeft(juce::jmin(560, b.getWidth())));
     }
 
@@ -1100,7 +1210,10 @@ void SourceView::resized()
     runBtn.setBounds(chop.removeFromLeft(64).reduced(2));
     clearCandBtn.setBounds(chop.removeFromRight(60).reduced(2));
     acceptBtn.setBounds(chop.removeFromRight(70).reduced(2));
-    mapBtn.setBounds(chop.removeFromRight(110).reduced(2));
+    mapMenuBtn.setBounds(chop.removeFromRight(24).reduced(1, 2));
+    mapBtn.setBounds(chop.removeFromRight(100).reduced(2));
+    if (cutBtn.isVisible()) cutBtn.setBounds(chop.removeFromRight(46).reduced(2));
+    lengthBox.setBounds(chop.removeFromRight(124).reduced(2));
     candInfo.setBounds(chop.reduced(6, 0));
 
     sMinus.setBounds(sel.removeFromLeft(24).reduced(1));
@@ -1121,6 +1234,11 @@ void SourceView::resized()
 void SourceView::timerCallback()
 {
     if (proc.engine.previewSlot.load() == slot && (proc.engine.previewFrame.load() >= 0 || markFrame >= 0)) canvas.repaint();
+    if (tapArmed)
+    {
+        const auto idle = juce::Time::getMillisecondCounter() - tapLastMs;
+        if (tapTimes.size() >= 4 ? idle > 2000 : idle > 6000) finishTap(tapTimes.size() >= 4);
+    }
     if (wasLoading[(size_t) slot] != proc.isSourceLoading(slot)) { wasLoading[(size_t) slot] = proc.isSourceLoading(slot); refresh(); }
 }
 
@@ -1184,7 +1302,9 @@ void SourceView::nudge(bool end, int64_t ms)
     if (v.selectedCandidate >= 0 && v.selectedCandidate < (int) v.candidates.size())
     {
         v.candidates[(size_t) v.selectedCandidate].start = v.selStart;
-        v.candidates[(size_t) v.selectedCandidate].end = v.selEnd;
+        auto& c = v.candidates[(size_t) v.selectedCandidate];
+        c.end = v.selEnd;
+        if (end) { c.foundEnd = v.selEnd; c.manualEnd = true; }
     }
     selectionChanged();
     commitPadEdit();
@@ -1199,8 +1319,14 @@ void SourceView::runChopTool()
     const auto d = data();
     if (d == nullptr) return;
     auto& v = view();
-    const bool hasSel = v.selStart >= 0 && v.selEnd > v.selStart;
-    const int64_t from = hasSel ? v.selStart : 0, to = hasSel ? v.selEnd : d->numFrames;
+    // a clicked candidate (or a live parameter change) keeps the range of the last run; a hand-made selection is a new range
+    const bool ownSel = v.selStart >= 0 && v.selEnd > v.selStart && v.selectedCandidate < 0;
+    if (v.selectedCandidate < 0) { v.rangeFrom = ownSel ? v.selStart : -1; v.rangeTo = ownSel ? v.selEnd : -1; }
+    else v.selStart = v.selEnd = -1;
+    const bool hasSel = v.rangeFrom >= 0 && v.rangeTo > v.rangeFrom;
+    const int64_t from = hasSel ? v.rangeFrom : 0, to = hasSel ? v.rangeTo : d->numFrames;
+    lastRunTool = toolBox.getSelectedId();
+    juce::String note;
     const auto g = grid();
     const int tool = toolBox.getSelectedId();
     std::vector<ChopCandidate> c;
@@ -1216,9 +1342,15 @@ void SourceView::runChopTool()
     }
     else if (tool == 2)
     {
-        if (!g.valid()) { proc.setStatus("BEAT SLICER needs the source BPM: set it on SRC BPM (or use EQUAL REGIONS)"); return; }
+        if (!g.valid()) { proc.setStatus("The analysis is still running..."); return; }
         static const double beats[] = { 0.25, 0.5, 1.0, 2.0, 4.0 };
-        c = ChopEngine::beatSlicer(*d, hasSel ? v.selStart : (int64_t) v.viewStart, (int) amount.getValue(), beats[juce::jlimit(0, 4, focusBox.getSelectedId() - 1)], g);
+        c = ChopEngine::beatSlicer(*d, hasSel ? from : (int64_t) std::max(0.0, g.originFrame()), (int) amount.getValue(), beats[juce::jlimit(0, 4, focusBox.getSelectedId() - 1)], g);
+    }
+    else if (tool == 3 && focusBox.getSelectedId() == 1 && g.valid())
+    {
+        double beats = 0.0;
+        c = ChopEngine::equalRegionsOnGrid(from, to, (int) amount.getValue(), d->numFrames, g, &beats);
+        note = beats >= 4.0 ? juce::String((int) (beats / 4.0)) + " bar(s) each" : juce::String(beats, 2) + " beat(s) each";
     }
     else if (tool == 3) c = ChopEngine::equalRegions(from, to, (int) amount.getValue());
     else if (tool == 4)
@@ -1228,14 +1360,158 @@ void SourceView::runChopTool()
     }
     else
     {
-        if (!g.valid()) { proc.setStatus("GRID CHOP needs the source BPM: set it on SRC BPM"); return; }
+        if (!g.valid()) { proc.setStatus("The analysis is still running..."); return; }
         static const GridDiv divs[] = { GridDiv::Bar, GridDiv::Half, GridDiv::Quarter, GridDiv::Eighth, GridDiv::Sixteenth };
         c = ChopEngine::gridChop(*d, from, to, g, divs[juce::jlimit(0, 4, focusBox.getSelectedId() - 1)]);
     }
-    if (c.size() > (size_t) kNumPads) c.resize((size_t) kNumPads);
+    if (c.size() > (size_t) kNumPads)
+    {
+        note = "first 64 of " + juce::String((int) c.size()) + " (select a shorter part or a bigger step)";
+        c.resize((size_t) kNumPads);
+    }
+    for (auto& x : c) x.foundEnd = x.end;
+    ChopEngine::applyLength(c, proc.ui.chopLength, d->numFrames);
     v.candidates = std::move(c);
     v.selectedCandidate = -1;
-    if (!v.candidates.empty()) proc.setStatus(juce::String((int) v.candidates.size()) + " candidates. Nothing is changed until you press -> PADS or ACCEPT.");
+    if (!v.candidates.empty()) proc.setStatus(juce::String((int) v.candidates.size()) + " chops" + (note.isNotEmpty() ? ", " + note : juce::String()) + ". -> PADS puts them on pads.");
+    refresh();
+}
+
+void SourceView::chopParamChanged()
+{
+    auto& v = view();
+    if (lastRunTool != 0 && lastRunTool == toolBox.getSelectedId() && !v.candidates.empty()) runChopTool();
+    else updateHeader();
+}
+
+juce::String SourceView::chopHint() const
+{
+    const juce::String n((int) amount.getValue());
+    switch (toolBox.getSelectedId())
+    {
+        case 1: return "Finds up to " + n + " good moments in the selection or the whole file";
+        case 2: return "Takes " + n + " pieces of " + focusBox.getText() + " in a row, from the selection start (or beat 1)";
+        case 3: return focusBox.getSelectedId() == 1 ? "Cuts the range into " + n + " equal pieces that lie on the BPM grid" : "Cuts the range into " + n + " equal pieces by time";
+        case 4: return "Cuts at every hit louder than the threshold";
+        case 5: return "Cuts the whole range at every " + focusBox.getText() + " line of the BPM grid";
+        default: return {};
+    }
+}
+
+void SourceView::mapToPads(int from, bool replace)
+{
+    auto& v = view();
+    if (v.candidates.empty()) return;
+    const int n = (int) v.candidates.size();
+    const auto before = proc.project.state().pads;
+    if (!replace && proc.project.firstEmptyPad(from) < 0) { proc.setStatus("No free pad from " + padLabel(from) + " on: the v next to -> PADS can replace pads"); return; }
+    const int done = proc.mapCandidatesToEmptyPads(slot, v.candidates, from, replace);
+    int first = -1, last = -1;
+    for (int i = from; i < kNumPads; ++i)
+        if (proc.project.state().pads[(size_t) i].sliceId != before[(size_t) i].sliceId) { if (first < 0) first = i; last = i; }
+    juce::String msg = juce::String(done) + " chops on pads";
+    if (first >= 0) { msg << " " << padLabel(first) << " - " << padLabel(last); proc.ui.selectedPad = first; proc.ui.bank = first / kPadsPerBank; }
+    if (done < n) msg << " (" << juce::String(n - done) << " did not fit)";
+    proc.setStatus(msg + ".  Ctrl+Z = undo");
+    v.candidates.clear();
+    v.selectedCandidate = -1;
+    v.selStart = v.selEnd = -1;
+    proc.listenersChanged();
+}
+
+void SourceView::setLengthMode(LengthMode m)
+{
+    auto& v = view();
+    proc.ui.chopLength = m;
+    for (auto& sv : proc.ui.src)
+        if (auto sd = proc.project.sourceDataForSlot((int) (&sv - proc.ui.src.data()))) ChopEngine::applyLength(sv.candidates, m, sd->numFrames);
+    if (v.selectedCandidate >= 0 && v.selectedCandidate < (int) v.candidates.size())
+        setSelection(v.candidates[(size_t) v.selectedCandidate].start, v.candidates[(size_t) v.selectedCandidate].end, proc.ui.autoAudition);
+    refresh();
+}
+
+void SourceView::candidatesEdited()
+{
+    const auto d = data();
+    auto& v = view();
+    if (d == nullptr) return;
+    ChopEngine::applyLength(v.candidates, proc.ui.chopLength, d->numFrames);
+    if (v.selectedCandidate >= 0 && v.selectedCandidate < (int) v.candidates.size())
+    {
+        v.selStart = v.candidates[(size_t) v.selectedCandidate].start;
+        v.selEnd = v.candidates[(size_t) v.selectedCandidate].end;
+        selectionChanged();
+    }
+}
+
+double SourceView::tappedBpm() const
+{
+    const auto d = data();
+    if (d == nullptr || tapTimes.size() < 3) return 0.0;
+    // positions in the sample are exact whatever tempo is being heard; real time is the fallback for tapping in silence
+    bool onSample = true;
+    for (size_t i = 0; i < tapFrames.size(); ++i) onSample = onSample && tapFrames[i] >= 0.0 && (i == 0 || tapFrames[i] > tapFrames[i - 1]);
+    const double p = onSample ? ChopEngine::tapPeriod(tapFrames) / d->sampleRate : ChopEngine::tapPeriod(tapTimes);
+    if (p <= 0.0) return 0.0;
+    double bpm = 60.0 / p;
+    // a hand is +-1 %: when the analysis says nearly the same, its number is the exact one
+    for (double k : { 0.25, 0.5, 1.0, 2.0, 4.0 })
+        if (d->analysis.bpm > 20.0 && std::abs(d->analysis.bpm * k / bpm - 1.0) < 0.02) return d->analysis.bpm * k;
+    return bpm;
+}
+
+void SourceView::tap()
+{
+    const auto d = data();
+    if (d == nullptr) return;
+    const bool playing = proc.engine.previewFrame.load() >= 0 && proc.engine.previewSlot.load() == slot;
+    tapLastMs = juce::Time::getMillisecondCounter();
+    if (!tapArmed)
+    {
+        tapArmed = true;
+        tapTimes.clear();
+        tapFrames.clear();
+        proc.setStatus("TAP: press T (or click TAP) on every beat, 4 times or more. Esc = cancel");
+        if (!playing)
+        {
+            const auto& v = view();
+            auditionFrom(v.selStart >= 0 ? v.selStart : (int64_t) std::max(0.0, v.viewStart));
+            updateHeader();
+            tapBtn.setButtonText("TAP  [T]");
+            return; // the first press starts the sample, the next ones are the beats
+        }
+    }
+    tapTimes.push_back(juce::Time::getMillisecondCounterHiRes() * 0.001);
+    tapFrames.push_back(playing ? proc.engine.previewFrame.load() : -1.0);
+    if (tapTimes.size() > 64) { tapTimes.erase(tapTimes.begin()); tapFrames.erase(tapFrames.begin()); }
+    const double bpm = tappedBpm();
+    updateHeader();
+    tapBtn.setButtonText(bpm > 0.0 ? juce::String(bpm, 1) + "  x" + juce::String((int) tapTimes.size()) : "TAP  x" + juce::String((int) tapTimes.size()));
+}
+
+void SourceView::finishTap(bool apply)
+{
+    const double bpm = tappedBpm();
+    const double firstFrame = tapFrames.empty() ? -1.0 : tapFrames.front();
+    tapArmed = false;
+    tapTimes.clear();
+    tapFrames.clear();
+    const auto d = data();
+    if (apply && d != nullptr && bpm >= 20.0 && bpm <= 400.0)
+    {
+        proc.project.edit("Tap tempo", [&](ProjectState& s)
+        {
+            auto& src = s.sources[(size_t) slot];
+            src.bpmOverride = bpm;
+            if (firstFrame >= 0.0) // the first tap is a beat: put the grid there, on the hit it was aimed at
+            {
+                const int64_t on = ChopEngine::nearestOnset(*d, (int64_t) firstFrame, (int64_t) (0.09 * d->sampleRate));
+                src.originOverride = (on >= 0 ? (double) on : firstFrame) / d->sampleRate;
+            }
+        });
+        proc.setStatus("SRC " + juce::String(slot + 1) + " tempo tapped: " + juce::String(bpm, 1) + " BPM, the first tap is beat 1 (drag the flag to move it, Ctrl+Z = undo)");
+    }
+    else proc.setStatus(apply ? "Tap tempo: no steady beat" : "Tap tempo cancelled");
     refresh();
 }
 
@@ -1245,6 +1521,7 @@ void SourceView::showBpmMenu()
     if (d == nullptr) return;
     const auto& s = proc.project.state().sources[(size_t) slot];
     juce::PopupMenu m;
+    m.addItem(10, "Tap it: TAP button or T on every beat");
     m.addItem(1, "Type source BPM...");
     if (d->analysis.bpm > 20.0)
     {
@@ -1271,7 +1548,8 @@ void SourceView::showBpmMenu()
         const auto& v = view();
         const double selSec = (double) (v.selEnd - v.selStart) / d->sampleRate;
         const double selStartSec = (double) v.selStart / d->sampleRate;
-        if (r == 1 || r == 7)
+        if (r == 10) { grabKeyboardFocus(); tap(); }
+        else if (r == 1 || r == 7)
         {
             auto* w = new juce::AlertWindow(r == 1 ? "Source BPM" : "Selection length", r == 1 ? "Tempo of this recording:" : "How many beats is the selection?", juce::MessageBoxIconType::NoIcon, this);
             w->addTextEditor("v", r == 1 ? juce::String(effectiveSourceBpm(proc.project.state().sources[(size_t) slot], d.get()) > 0 ? effectiveSourceBpm(proc.project.state().sources[(size_t) slot], d.get()) : 120.0, 2) : "4");
@@ -1351,6 +1629,9 @@ bool SourceView::keyPressed(const juce::KeyPress& k)
     const auto d = data();
     // Space goes to the editor (one play / stop switch for the whole plug-in)
     if (k == juce::KeyPress::returnKey) { quickAssign(); return true; }
+    if (k == juce::KeyPress::escapeKey && tapArmed) { finishTap(false); return true; }
+    if (tapArmed && !k.getModifiers().isCtrlDown() && (k.getKeyCode() == 'T' || k.getKeyCode() == 't')) { tap(); return true; }
+    if (k == juce::KeyPress::escapeKey && proc.ui.padMode == UiState::PadMode::Cut) return false; // the editor ends PICK
     if (k == juce::KeyPress::escapeKey) { stopAudition(); proc.ui.padMode = UiState::PadMode::Perform; endPadEdit(); return true; }
     if (k.getTextCharacter() == 'z' || k.getTextCharacter() == 'Z') { zoomToSelection(); return true; }
     if ((k.getTextCharacter() == 'm' || k.getTextCharacter() == 'M') && d)
@@ -1361,7 +1642,8 @@ bool SourceView::keyPressed(const juce::KeyPress& k)
         const int64_t now = ChopEngine::snap(*d, (int64_t) pf, SnapMode::Transient, grid(), GridDiv::Sixteenth, (int64_t) (0.03 * d->sampleRate));
         if (markFrame >= 0 && now > markFrame + 64)
         {
-            v.candidates.push_back({ markFrame, now, 1.0f, "Mark" });
+            v.candidates.push_back({ markFrame, now, 1.0f, "Mark", now });
+            ChopEngine::applyLength(v.candidates, proc.ui.chopLength, d->numFrames);
             proc.setStatus("Marked slice " + juce::String((int) v.candidates.size()) + "  (-> PADS to map them)");
             updateHeader();
         }

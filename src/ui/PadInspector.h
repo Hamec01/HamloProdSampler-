@@ -13,6 +13,7 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
     std::function<void()> onClose;
+    std::function<void()> onScopeChanged;
     std::function<void(int pad)> onLocate;
 
 private:
@@ -32,6 +33,15 @@ private:
 
     HPSamplerProcessor& proc;
     juce::Label header, syncInfo, sliceInfo;
+    template <class Get> bool mixed(const Get& get) const // the pads of the bank differ in this parameter
+    {
+        const auto t = proc.editTargets();
+        const auto& pads = proc.project.state().pads;
+        for (int i : t) if (get(pads[(size_t) i].s) != get(pads[(size_t) t.front()].s)) return true;
+        return false;
+    }
+    static void markMixed(juce::Label& l, const juce::String& name, bool isMixed);
+    juce::TextButton scopeBtn;
     juce::TextButton closeBtn { "X" }, locateBtn { "LOCATE IN SRC" }, playBtn { "PLAY" };
     juce::TextButton startM { "IN -" }, startP { "IN +" }, endM { "OUT -" }, endP { "OUT +" };
     juce::TextButton half { "1/2x" }, normal { "1x" }, dbl { "2x" };

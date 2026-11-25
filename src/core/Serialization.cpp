@@ -265,7 +265,7 @@ juce::MidiFile Serialization::patternToMidi(const ProjectState& s)
     for (const auto& e : s.events)
     {
         const int note = kBaseMidiNote + e.pad;
-        if (note > 127 || e.muted) continue;
+        if (note > 127 || e.muted || e.tick >= (int64_t) s.settings.patternBars * kTicksPerBar) continue;
         const auto& p = s.pads[(size_t) e.pad];
         const bool gate = p.assigned && effectivePlayMode(p, s.settings) == PlayMode::Gate;
         const int64_t len = gate ? e.length : std::min<int64_t>(e.length, kPPQ / 8); // OneShot: trigger only

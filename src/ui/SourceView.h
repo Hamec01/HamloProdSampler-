@@ -81,6 +81,7 @@ public:
     int64_t markFrame = -1; // quick-chop mark while auditioning
     // Pad edit: the selection IS the pad's range while editingPad >= 0 (see UiState)
     int  editingPad() const;
+    void candidatesEdited();      // an edge was dragged: re-apply LENGTH
     void commitPadEdit();
     void endPadEdit();
 
@@ -90,6 +91,20 @@ private:
     void showBpmMenu();
     void showKeyMenu();
     void runChopTool();
+    void chopParamChanged();      // live: the candidates follow the tool's settings
+    juce::String chopHint() const;
+    void mapToPads(int fromPad, bool replace);
+    void setLengthMode(LengthMode m);
+    void tap();
+    void finishTap(bool apply);
+    double tappedBpm() const;
+    bool tapArmed = false;
+    std::vector<double> tapTimes, tapFrames; // seconds / source frames of the audition (-1 = silent)
+    juce::uint32 tapLastMs = 0;
+    int lastRunTool = 0;
+    juce::TextButton tapBtn { "TAP" }, gridBtn { "GRID" }, hearBtn, toEndBtn { "TO END" };
+    juce::ComboBox lengthBox;
+    juce::TextButton cutBtn { "CUT" }, mapMenuBtn { "v" };
     void nudge(bool end, int64_t frames);
     void openFile();
 

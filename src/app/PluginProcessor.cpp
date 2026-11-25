@@ -55,6 +55,23 @@ HPSamplerProcessor::HPSamplerProcessor()
     };
     renderer.onRendered = [this](int pad, std::unique_ptr<PadSound> s)
     {
+        if (pad >= kNumPads) // a whole source at the project tempo
+        {
+            const size_t slot = (size_t) (pad - kNumPads);
+            const auto d = project.sourceDataForSlot((int) slot);
+            if (s == nullptr || d == nullptr || s->renderKey != fitSubmitted[slot]) return; // outdated
+            auto p = std::make_unique<PreviewSource>();
+            p->sampleRate = s->sampleRate;
+            p->ratio = (double) s->audio.getNumSamples() / (double) d->numFrames;
+            if (s->master != nullptr) p->audio = s->master; // shared with the pads
+            else p->audio = std::make_shared<juce::AudioBuffer<float>>(std::move(s->audio));
+            engine.publishPreviewSource((int) slot, std::move(p));
+            fitPublished[slot] = fitSubmitted[slot];
+            listeners.call([](Listener& l) { l.projectChanged(); });
+            return;
+        }
+        contextDirty = true; // MAIN sounds different now
+        lastProjectChangeMs = juce::Time::getMillisecondCounter();
         soundSeconds[(size_t) pad] = s ? s->audio.getNumSamples() / s->sampleRate : 0.0;
         engine.publishPadSound(pad, std::move(s));
         listeners.call([](Listener& l) { l.statusChanged(); });
@@ -203,9 +220,21 @@ void HPSamplerProcessor::syncEngine()
     {
         const auto d = project.sourceDataForSlot(i);
         const void* ptr = d ? d->audio.get() : nullptr;
-        if (ptr != publishedPreview[(size_t) i])
+        auto fit = ui.hearFitted && d ? PadRenderer::makeFitJob(project, i, engineRate) : PadRenderJob {};
+        if (fit.audio != nullptr && std::abs(fit.timeRatio - 1.0) < 1e-4 && std::abs(fit.speed - 1.0) < 1e-4 && std::abs(fit.transpose) < 1e-3f)
+            fit.audio = nullptr; // nothing to fit
+        const uint64_t fitKey = fit.audio ? fit.key() : 0;
+        const bool backToOriginal = fitKey == 0 && fitPublished[(size_t) i] != 0;
+        if (fitKey == 0) fitSubmitted[(size_t) i] = fitPublished[(size_t) i] = 0;
+        else if (fitKey != fitSubmitted[(size_t) i])
+        {
+            fitSubmitted[(size_t) i] = fitKey;
+            renderer.submit(std::move(fit));
+        }
+        if (ptr != publishedPreview[(size_t) i] || backToOriginal)
         {
             publishedPreview[(size_t) i] = ptr;
+            fitPublished[(size_t) i] = 0;
             auto p = std::make_unique<PreviewSource>();
             if (d) { p->audio = d->audio; p->sampleRate = d->sampleRate; }
             engine.publishPreviewSource(i, std::move(p));
@@ -252,7 +281,7 @@ void HPSamplerProcessor::timerCallback()
         session->setBpm((float) st.settings.bpm);
         // debounce: send the MAIN context 400 ms after the last edit, only while connected (no regeneration in HPDG)
         if (autoSyncContext && contextDirty && session->getState() == hpbridge::BridgeConnectionState::Connected
-            && juce::Time::getMillisecondCounter() - lastProjectChangeMs > 400)
+            && juce::Time::getMillisecondCounter() - lastProjectChangeMs > 400 && !renderer.isBusy())
             sendContextNow();
         if ((guidePoll % 30) == 0) updateBridgeName();
     }
@@ -289,6 +318,11 @@ SourceGrid HPSamplerProcessor::gridForSource(int slot) const
     if (d == nullptr) return g;
     const auto& s = project.state().sources[(size_t) slot];
     g.bpm = effectiveSourceBpm(s, d.get());
+    if (g.bpm <= 20.0 && d->analysis.ready) // a guess is better than no grid: shown as such, never used to stretch
+    {
+        g.tentative = true;
+        g.bpm = d->analysis.bpm > 20.0 ? d->analysis.bpm : project.state().settings.bpm;
+    }
     g.origin = effectiveSourceOrigin(s, d.get());
     g.sampleRate = d->sampleRate;
     return g;
@@ -353,6 +387,7 @@ void HPSamplerProcessor::assignToPad(int pad, int slot, int64_t start, int64_t e
         p.end = end;
         p.name = name.isNotEmpty() ? name : s.sources[(size_t) slot].name.substring(0, 10);
         if (keepSettings) p.s = settings; // re-assigning keeps the pad's character
+        else p.s.chokeGroup = throughCutGroup(s, slot, end);
     });
     ui.selectedPad = pad;
     setStatus(padLabel(pad) + " <- SRC " + juce::String(slot + 1) + " ("
@@ -369,7 +404,7 @@ int HPSamplerProcessor::assignToNextEmptyPad(int slot, int64_t start, int64_t en
     return pad;
 }
 
-int HPSamplerProcessor::mapCandidatesToEmptyPads(int slot, const std::vector<ChopCandidate>& c, int fromPad)
+int HPSamplerProcessor::mapCandidatesToEmptyPads(int slot, const std::vector<ChopCandidate>& c, int fromPad, bool replace)
 {
     int count = 0;
     project.edit("Map chops to pads", [&](ProjectState& s)
@@ -377,12 +412,13 @@ int HPSamplerProcessor::mapCandidatesToEmptyPads(int slot, const std::vector<Cho
         int next = fromPad;
         for (const auto& cand : c)
         {
-            while (next < kNumPads && s.pads[(size_t) next].assigned) ++next;
+            while (!replace && next < kNumPads && s.pads[(size_t) next].assigned) ++next;
             if (next >= kNumPads) break;
             Slice sl { newId(), slot, cand.start, cand.end, cand.origin };
             s.slices.push_back(sl);
             auto& p = s.pads[(size_t) next];
             p = Pad {};
+            p.s.chokeGroup = throughCutGroup(s, slot, cand.end);
             p.assigned = true;
             p.sliceId = sl.id;
             p.src = slot;
@@ -394,6 +430,98 @@ int HPSamplerProcessor::mapCandidatesToEmptyPads(int slot, const std::vector<Cho
         }
     });
     return count;
+}
+
+int HPSamplerProcessor::throughCutGroup(const ProjectState& s, int slot, int64_t end) const
+{
+    const auto d = project.sourceDataForSlot(slot);
+    if (d == nullptr || !ui.cutThrough || ui.chopLength != LengthMode::ToEnd || end < d->numFrames) return 0;
+    std::array<bool, kMaxChokeGroups + 1> used {};
+    for (const auto& p : s.pads)
+    {
+        if (!p.assigned || p.s.chokeGroup <= 0) continue;
+        if (p.src == slot && p.end >= d->numFrames) return p.s.chokeGroup; // join the pads of this source
+        used[(size_t) juce::jlimit(0, kMaxChokeGroups, p.s.chokeGroup)] = true;
+    }
+    for (int g = 1; g <= kMaxChokeGroups; ++g) if (!used[(size_t) g]) return g;
+    return kMaxChokeGroups;
+}
+
+std::vector<int> HPSamplerProcessor::editTargets() const
+{
+    std::vector<int> t;
+    const auto& pads = project.state().pads;
+    if (ui.editBank < 0) { if (pads[(size_t) ui.selectedPad].assigned) t.push_back(ui.selectedPad); }
+    else
+        for (int i = ui.editBank * kPadsPerBank; i < (ui.editBank + 1) * kPadsPerBank; ++i)
+            if (pads[(size_t) i].assigned) t.push_back(i);
+    return t;
+}
+
+int HPSamplerProcessor::editRefPad() const
+{
+    if (ui.editBank < 0) return ui.selectedPad;
+    const auto t = editTargets();
+    if (t.empty()) return ui.editBank * kPadsPerBank;
+    return std::find(t.begin(), t.end(), ui.selectedPad) != t.end() ? ui.selectedPad : t.front();
+}
+
+juce::String HPSamplerProcessor::editScopeName() const
+{
+    return ui.editBank < 0 ? padLabel(ui.selectedPad) : "BANK " + juce::String::charToString(juce::juce_wchar('A' + ui.editBank));
+}
+
+void HPSamplerProcessor::editPads(const juce::String& label, const std::function<void(PadSettings&, int)>& fn)
+{
+    const auto t = editTargets();
+    if (t.empty()) return;
+    project.edit(label + " " + editScopeName(), [&](ProjectState& s) { for (int i : t) fn(s.pads[(size_t) i].s, i); });
+}
+
+std::vector<int> HPSamplerProcessor::cutScopePads(CutScope scope) const
+{
+    std::vector<int> t;
+    const auto& pads = project.state().pads;
+    const int src = pads[(size_t) ui.selectedPad].src;
+    for (int i = 0; i < kNumPads; ++i)
+        if (pads[(size_t) i].assigned
+            && (scope == CutScope::All || (scope == CutScope::Bank ? i / kPadsPerBank == ui.bank : pads[(size_t) i].src == src)))
+            t.push_back(i);
+    return t;
+}
+
+int HPSamplerProcessor::setCutGroup(CutScope scope, int group, bool toggle)
+{
+    const auto t = cutScopePads(scope);
+    if (t.empty()) return 0;
+    const auto& pads = project.state().pads;
+    if (toggle && std::all_of(t.begin(), t.end(), [&](int i) { return pads[(size_t) i].s.chokeGroup == group; })) group = 0;
+    project.edit("Cut group", [&](ProjectState& s) { for (int i : t) s.pads[(size_t) i].s.chokeGroup = group; });
+    setStatus(juce::String((int) t.size()) + (group > 0 ? " pads are in cut group " + juce::String(group) + ": they stop each other" : juce::String(" pads do not cut each other"))
+              + ".  Ctrl+Z = undo");
+    return group;
+}
+
+bool HPSamplerProcessor::padPlaysToEnd(int pad) const
+{
+    const auto& p = project.state().pads[(size_t) pad];
+    const auto d = p.assigned ? project.sourceDataForSlot(p.src) : nullptr;
+    return d != nullptr && p.end >= d->numFrames;
+}
+
+void HPSamplerProcessor::togglePadToEnd(int pad)
+{
+    const auto& p = project.state().pads[(size_t) pad];
+    const auto d = p.assigned ? project.sourceDataForSlot(p.src) : nullptr;
+    if (d == nullptr) return;
+    int64_t end = d->numFrames;
+    if (p.end >= d->numFrames) // back to the length it was chopped with
+    {
+        for (const auto& sl : project.state().slices) if (sl.id == p.sliceId) end = sl.end;
+        if (end <= p.start || end >= d->numFrames) { setStatus(padLabel(pad) + " already plays to the end (drag its right edge to shorten it)"); return; }
+    }
+    project.edit(padLabel(pad) + " length", [&](ProjectState& s) { s.pads[(size_t) pad].end = end; });
+    setStatus(padLabel(pad) + (end >= d->numFrames ? " plays to the end of the sample" : " is back to its chopped length"));
 }
 
 void HPSamplerProcessor::clearPad(int pad)
@@ -413,6 +541,7 @@ void HPSamplerProcessor::pastePad(int pad)
 
 void HPSamplerProcessor::triggerPad(int pad, float velocity, int pointer)
 {
+    renderer.setFocus(pad);
     engine.padDown(pad, velocity, pointer);
     if (ui.selectedPad != pad)
     {
@@ -684,12 +813,15 @@ void HPSamplerProcessor::useSourceAsAnchor(int slot)
 // --------------------------------------------------------------------------------------------
 // export / result
 
-bool HPSamplerProcessor::exportWav(const juce::File& f, juce::String& error)
+bool HPSamplerProcessor::exportWav(const juce::File& f, juce::String& error, double tailSeconds)
 {
+    renderer.finish(30000);
     std::array<const PadSound*, kNumPads> sounds {};
     for (int i = 0; i < kNumPads; ++i) sounds[(size_t) i] = engine.padSound(i);
     juce::AudioBuffer<float> out;
-    Engine::renderOffline(*buildSnapshot(), sounds, engineRate, out, 2.0);
+    auto snap = buildSnapshot();
+    snap->metronome = false; // never in a file
+    Engine::renderOffline(*snap, sounds, engineRate, out, tailSeconds);
     f.deleteFile();
     std::unique_ptr<juce::FileOutputStream> stream(f.createOutputStream());
     if (stream == nullptr) { error = "Cannot write " + f.getFullPathName(); return false; }
@@ -711,9 +843,24 @@ bool HPSamplerProcessor::exportMidi(const juce::File& f, juce::String& error)
     return true;
 }
 
+juce::File HPSamplerProcessor::writeDragFile(bool midi, juce::String& error)
+{
+    const auto& st = project.state();
+    if (st.events.empty()) { error = "MAIN is empty: nothing to drag"; return {}; }
+    const auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("HamloProd/HPSAMPLER/Drag");
+    if (!dir.createDirectory()) { error = "Cannot create " + dir.getFullPathName(); return {}; }
+    juce::String name = "HPSAMPLER " + juce::String(st.settings.bpm, std::abs(st.settings.bpm - std::round(st.settings.bpm)) < 0.05 ? 0 : 1) + " BPM";
+    if (st.settings.key.known()) name << " " << st.settings.key.label();
+    name << " " << juce::Time::getCurrentTime().formatted("%y%m%d-%H%M%S");
+    const auto f = dir.getNonexistentChildFile(juce::File::createLegalFileName(name), midi ? ".mid" : ".wav", false);
+    const bool ok = midi ? exportMidi(f, error) : exportWav(f, error, 0.0); // exactly the loop: it repeats cleanly in the playlist
+    return ok ? f : juce::File();
+}
+
 void HPSamplerProcessor::renderResult()
 {
     if (project.state().events.empty()) { resultAudio.reset(); resultRevision = project.revision(); return; }
+    renderer.finish(30000);
     std::array<const PadSound*, kNumPads> sounds {};
     for (int i = 0; i < kNumPads; ++i) sounds[(size_t) i] = engine.padSound(i);
     auto out = std::make_shared<juce::AudioBuffer<float>>();

@@ -8,6 +8,16 @@ PadInspector::PadInspector(HPSamplerProcessor& p) : proc(p)
     header.setFont(theme::mono(15.0f, true));
     addAndMakeVisible(closeBtn);
     closeBtn.onClick = [this] { if (onClose) onClose(); };
+    addAndMakeVisible(scopeBtn);
+    scopeBtn.setWantsKeyboardFocus(false);
+    scopeBtn.setTooltip("Edit one pad / edit all pads of the bank at once");
+    scopeBtn.onClick = [this]
+    {
+        proc.ui.editBank = proc.ui.editBank >= 0 ? -1 : proc.ui.selectedPad / kPadsPerBank;
+        if (proc.ui.editBank >= 0) { proc.ui.editingPad = -1; proc.ui.bank = proc.ui.editBank; }
+        refresh();
+        if (onScopeChanged) onScopeChanged();
+    };
     addAndMakeVisible(viewport);
     viewport.setViewedComponent(&content, false);
     viewport.setScrollBarsShown(true, false);
@@ -36,7 +46,7 @@ PadInspector::PadInspector(HPSamplerProcessor& p) : proc(p)
     startM.setTooltip("Move the start 1 ms earlier (Shift 10 ms, Alt 1 frame)");
     auto nudge = [this](bool end, int dir)
     {
-        const int pad = proc.ui.selectedPad;
+        const int pad = proc.editRefPad();
         const auto& pd = proc.project.state().pads[(size_t) pad];
         const auto d = proc.project.sourceDataForSlot(pd.src);
         if (!pd.assigned || d == nullptr) return;
@@ -74,10 +84,10 @@ PadInspector::PadInspector(HPSamplerProcessor& p) : proc(p)
     content.addAndMakeVisible(locRow);
     rows.push_back({ "SLICE", nullptr, trimRow, 28 });
     rows.push_back({ "SLICE", nullptr, locRow, 28 });
-    locateBtn.onClick = [this] { if (onLocate) onLocate(proc.ui.selectedPad); };
+    locateBtn.onClick = [this] { if (onLocate) onLocate(proc.editRefPad()); };
     playBtn.onClick = [this]
     {
-        const int pad = proc.ui.selectedPad;
+        const int pad = proc.editRefPad();
         proc.triggerPad(pad, 0.9f, Engine::kAuditionPointer | 7);
         juce::Component::SafePointer<PadInspector> safe(this);
         juce::Timer::callAfterDelay(400, [safe, pad] { if (safe) safe->proc.releasePad(pad, Engine::kAuditionPointer | 7); });
@@ -88,9 +98,9 @@ PadInspector::PadInspector(HPSamplerProcessor& p) : proc(p)
     for (auto* b : { &half, &normal, &dbl }) b->setWantsKeyboardFocus(false);
     half.setTooltip("Half speed (STRETCH / OFF keep the pitch, REPITCH goes an octave down)");
     dbl.setTooltip("Double speed");
-    half.onClick = [this, setSpeed] { setSpeed(proc.project.state().pads[(size_t) proc.ui.selectedPad].s.speed * 0.5f); };
+    half.onClick = [this, setSpeed] { setSpeed(proc.project.state().pads[(size_t) proc.editRefPad()].s.speed * 0.5f); };
     normal.onClick = [setSpeed] { setSpeed(1.0f); };
-    dbl.onClick = [this, setSpeed] { setSpeed(proc.project.state().pads[(size_t) proc.ui.selectedPad].s.speed * 2.0f); };
+    dbl.onClick = [this, setSpeed] { setSpeed(proc.project.state().pads[(size_t) proc.editRefPad()].s.speed * 2.0f); };
     auto* speedRow = extras.add(new Pair(&half, &normal, &dbl, &fitBox));
     content.addAndMakeVisible(speedRow);
     rows.push_back({ "PITCH & TIME", nullptr, speedRow, 28 });
@@ -98,15 +108,22 @@ PadInspector::PadInspector(HPSamplerProcessor& p) : proc(p)
     fitBox.setTooltip("Set the speed so the pad lasts exactly this long at the project tempo");
     const juce::StringArray fits { "1/4 beat", "1/2 beat", "1 beat", "2 beats", "1 bar", "2 bars", "4 bars" };
     for (int i = 0; i < fits.size(); ++i) fitBox.addItem(fits[i], i + 1);
-    fitBox.onChange = [this, setSpeed]
+    fitBox.onChange = [this]
     {
         const int id = fitBox.getSelectedId();
         if (id <= 0 || updating) return;
         static const double beats[] = { 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0 };
-        const auto info = proc.padSyncInfo(proc.ui.selectedPad);
         const double target = beats[id - 1] * 60.0 / proc.project.state().settings.bpm;
-        const double base = info.outputSeconds * info.userSpeed; // length at speed 1
-        if (base > 0.0 && target > 0.0) setSpeed((float) (base / target));
+        std::array<double, kNumPads> base {}; // length at speed 1: every pad gets its own speed
+        for (int i : proc.editTargets())
+        {
+            const auto info = proc.padSyncInfo(i);
+            base[(size_t) i] = info.outputSeconds * info.userSpeed;
+        }
+        proc.editPads("Fit", [&](PadSettings& s, int i)
+        {
+            if (base[(size_t) i] > 0.0 && target > 0.0) s.speed = juce::jlimit(0.125f, 8.0f, (float) (base[(size_t) i] / target));
+        });
         fitBox.setSelectedId(0, juce::dontSendNotification);
     };
     addCombo("PITCH & TIME", "Sync", { "Project default", "Off (as recorded)", "Repitch (vintage)", "Stretch (independent)" },
@@ -179,12 +196,14 @@ juce::Slider& PadInspector::addSlider(const juce::String& section, const juce::S
     r.label->setFont(theme::ui(11.5f));
     r.label->setColour(juce::Label::textColourId, theme::textDim);
     content.addAndMakeVisible(*r.label);
+    auto* lab = r.label.get();
     r.control = s;
     content.addAndMakeVisible(s);
     rows.push_back(std::move(r));
-    updaters.push_back([this, s, get]
+    updaters.push_back([this, s, get, lab, name]
     {
-        const auto& p = proc.project.state().pads[(size_t) proc.ui.selectedPad];
+        const auto& p = proc.project.state().pads[(size_t) proc.editRefPad()];
+        markMixed(*lab, name, mixed(get));
         if (!s->isMouseButtonDown()) s->setValue(get(p.s), juce::dontSendNotification);
     });
     return *s;
@@ -199,6 +218,7 @@ juce::ComboBox& PadInspector::addCombo(const juce::String& section, const juce::
     {
         if (updating) return;
         const int id = c->getSelectedId();
+        if (id <= 0) return;
         edit(name, [set, id](PadSettings& ps) { set(ps, id); });
     };
     Row r;
@@ -207,39 +227,57 @@ juce::ComboBox& PadInspector::addCombo(const juce::String& section, const juce::
     r.label->setFont(theme::ui(11.5f));
     r.label->setColour(juce::Label::textColourId, theme::textDim);
     content.addAndMakeVisible(*r.label);
+    auto* lab = r.label.get();
     r.control = c;
     content.addAndMakeVisible(c);
     rows.push_back(std::move(r));
-    updaters.push_back([this, c, get]
+    c->setTextWhenNothingSelected("(pads differ)");
+    updaters.push_back([this, c, get, lab, name]
     {
-        const auto& p = proc.project.state().pads[(size_t) proc.ui.selectedPad];
-        c->setSelectedId(get(p.s), juce::dontSendNotification);
+        const auto& p = proc.project.state().pads[(size_t) proc.editRefPad()];
+        const bool m = mixed(get);
+        markMixed(*lab, name, m);
+        c->setSelectedId(m ? 0 : get(p.s), juce::dontSendNotification); // any choice then goes to all pads
     });
     return *c;
 }
 
 void PadInspector::edit(const juce::String& label, const std::function<void(PadSettings&)>& fn)
 {
-    const int pad = proc.ui.selectedPad;
-    if (!proc.project.state().pads[(size_t) pad].assigned) return;
-    proc.project.edit(label + " " + padLabel(pad), [&](ProjectState& s) { fn(s.pads[(size_t) pad].s); });
+    proc.editPads(label, [&](PadSettings& s, int) { fn(s); });
+}
+
+void PadInspector::markMixed(juce::Label& l, const juce::String& name, bool isMixed)
+{
+    l.setText(isMixed ? name + " *" : name, juce::dontSendNotification);
+    l.setTooltip(isMixed ? "The pads of this bank have different values; a change here sets all of them" : juce::String());
+    l.setColour(juce::Label::textColourId, isMixed ? theme::accent : theme::textDim);
 }
 
 void PadInspector::refresh()
 {
     updating = true;
     const auto& st = proc.project.state();
-    const int pad = proc.ui.selectedPad;
+    const bool bank = proc.ui.editBank >= 0;
+    const int pad = proc.editRefPad();
     const auto& p = st.pads[(size_t) pad];
-    header.setText("PAD EDIT  " + padLabel(pad) + (p.assigned ? "  " + p.name : juce::String("  (empty)")), juce::dontSendNotification);
-    header.setColour(juce::Label::textColourId, p.assigned ? st.sources[(size_t) p.src].colour : theme::textDim);
+    for (auto* b : { &startM, &startP, &endM, &endP, &locateBtn }) b->setEnabled(!bank); // the range belongs to one pad
+    scopeBtn.setButtonText(bank ? "ONE PAD" : "BANK " + juce::String::charToString(juce::juce_wchar('A' + pad / kPadsPerBank)));
+    header.setText(bank ? "EDIT " + proc.editScopeName() : "PAD EDIT  " + padLabel(pad) + (p.assigned ? "  " + p.name : juce::String("  (empty)")), juce::dontSendNotification);
+    header.setColour(juce::Label::textColourId, bank ? theme::accent : p.assigned ? st.sources[(size_t) p.src].colour : theme::textDim);
     for (auto& u : updaters) u();
     reverse.setToggleState(p.s.reverse, juce::dontSendNotification);
     loop.setToggleState(p.s.loop, juce::dontSendNotification);
     followKey.setToggleState(p.s.followKey, juce::dontSendNotification);
     content.setEnabled(p.assigned);
 
-    if (p.assigned)
+    if (bank && p.assigned)
+    {
+        sliceInfo.setText("ALL " + juce::String((int) proc.editTargets().size()) + " PADS\nshown: " + padLabel(pad), juce::dontSendNotification);
+        syncInfo.setText("Only what you move is changed, on every pad.\n* = the pads differ now.\nThe last change wins: a pad can be edited\non its own afterwards.", juce::dontSendNotification);
+        syncInfo.setColour(juce::Label::textColourId, theme::text);
+    }
+    else if (p.assigned)
     {
         const auto d = proc.project.sourceDataForSlot(p.src);
         const double sr = d ? d->sampleRate : 44100.0;
@@ -287,6 +325,7 @@ void PadInspector::resized()
     auto r = getLocalBounds().reduced(8, 6);
     auto top = r.removeFromTop(28);
     closeBtn.setBounds(top.removeFromRight(28).reduced(2));
+    scopeBtn.setBounds(top.removeFromRight(78).reduced(2));
     header.setBounds(top);
     viewport.setBounds(r);
     const int w = r.getWidth() - viewport.getScrollBarThickness() - 2;

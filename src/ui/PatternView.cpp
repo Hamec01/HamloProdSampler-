@@ -1184,7 +1184,7 @@ PatternView::PatternView(HPSamplerProcessor& p) : proc(p)
 {
     setWantsKeyboardFocus(true);
     addAndMakeVisible(lanes);
-    for (auto* b : { &patternTab, &resultTab, &helpBtn, &snapBtn, &rowsBtn, &velBtn, &followBtn, &zoomOutBtn, &zoomInBtn, &fitBtn, &rowOutBtn, &rowInBtn, &guideBtn, &quantBtn, &clearBtn, &wavBtn, &midiBtn, &renderBtn })
+    for (auto* b : std::initializer_list<juce::TextButton*> { &patternTab, &resultTab, &helpBtn, &snapBtn, &rowsBtn, &velBtn, &followBtn, &zoomOutBtn, &zoomInBtn, &fitBtn, &rowOutBtn, &rowInBtn, &guideBtn, &quantBtn, &clearBtn, &wavBtn, &midiBtn, &renderBtn })
     {
         b->setWantsKeyboardFocus(false);
         addAndMakeVisible(*b);
@@ -1263,6 +1263,10 @@ PatternView::PatternView(HPSamplerProcessor& p) : proc(p)
     };
     wavBtn.onClick = [this] { exportWav(); };
     midiBtn.onClick = [this] { exportMidi(); };
+    wavBtn.makeFile = [this] { return dragFile(false); };
+    midiBtn.makeFile = [this] { return dragFile(true); };
+    wavBtn.setTooltip("Drag into the DAW: MAIN as a WAV loop. Click = save as.");
+    midiBtn.setTooltip("Drag into the DAW: the pad notes as MIDI (C1 = A01). Click = save as.");
     startTimerHz(30);
     refresh();
 }
@@ -1664,6 +1668,28 @@ void PatternView::resized()
     zoomLabel.setBounds(bar.removeFromRight(50));
     lanes.setBounds(r.withTrimmedTop(2));
     lanes.clampView();
+}
+
+juce::File PatternView::dragFile(bool midi)
+{
+    juce::String err;
+    const auto f = proc.writeDragFile(midi, err);
+    proc.setStatus(f == juce::File() ? err : "Drop it into the DAW: " + f.getFileName());
+    return f;
+}
+
+void PatternView::startFileDrag(juce::Component& from, const std::function<juce::File()>& makeFile)
+{
+    const auto f = makeFile ? makeFile() : juce::File();
+    if (f.existsAsFile())
+        juce::DragAndDropContainer::performExternalDragDropOfFiles({ f.getFullPathName() }, false, &from);
+}
+
+void PatternView::mouseDrag(const juce::MouseEvent& e)
+{
+    if (resultDragged || proc.ui.mainTab != 1 || e.getDistanceFromDragStart() < 8 || proc.resultAudio == nullptr) return;
+    resultDragged = true;
+    startFileDrag(*this, [this] { return dragFile(false); });
 }
 
 void PatternView::exportWav()

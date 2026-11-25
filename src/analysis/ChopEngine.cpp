@@ -266,6 +266,66 @@ std::vector<ChopCandidate> ChopEngine::equalRegions(int64_t from, int64_t to, in
     return out;
 }
 
+std::vector<ChopCandidate> ChopEngine::equalRegionsOnGrid(int64_t from, int64_t to, int count, int64_t numFrames,
+                                                          const SourceGrid& grid, double* beatsEach)
+{
+    std::vector<ChopCandidate> out;
+    if (!grid.valid() || count <= 0 || to <= from) return out;
+    const double raw = (double) (to - from) / count / grid.framesPerBeat();
+    double beats = 0.25, best = 1.0e9;
+    for (double b : { 0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0 })
+        if (const double d = std::abs(std::log2(raw / b)); d < best) { best = d; beats = b; }
+    if (beatsEach != nullptr) *beatsEach = beats;
+    const double step = beats * grid.framesPerBeat(), unit = std::min(beats, 1.0) * grid.framesPerBeat();
+    double pos = grid.originFrame() + std::round(((double) from - grid.originFrame()) / unit) * unit;
+    while (pos < -0.5) pos += unit;
+    for (int i = 0; i < count; ++i)
+    {
+        const int64_t s = (int64_t) std::llround(pos + i * step), e = (int64_t) std::llround(pos + (i + 1) * step);
+        if (s >= numFrames - 32) break;
+        out.push_back({ s, std::min(e, numFrames), 1.0f, "Region" });
+    }
+    return out;
+}
+
+void ChopEngine::applyLength(std::vector<ChopCandidate>& c, LengthMode mode, int64_t numFrames)
+{
+    for (auto& x : c)
+    {
+        if (x.foundEnd <= x.start) x.foundEnd = x.end;
+        x.end = x.foundEnd;
+        if (x.manualEnd || mode == LengthMode::Found) continue;
+        if (mode == LengthMode::ToEnd) x.end = numFrames;
+        else
+        {
+            int64_t next = numFrames + 1;
+            for (const auto& o : c) if (o.start > x.start && o.start < next) next = o.start;
+            if (next <= numFrames) x.end = next;
+        }
+        x.end = std::max(x.end, x.start + 1);
+    }
+}
+
+double ChopEngine::tapPeriod(const std::vector<double>& taps)
+{
+    if (taps.size() < 3) return 0.0;
+    std::vector<double> gaps;
+    for (size_t i = 1; i < taps.size(); ++i) gaps.push_back(taps[i] - taps[i - 1]);
+    std::sort(gaps.begin(), gaps.end());
+    const double med = gaps[gaps.size() / 2];
+    if (med <= 0.0) return 0.0;
+    // least squares of tap time over beat number
+    double n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0, beat = 0;
+    for (size_t i = 0; i < taps.size(); ++i)
+    {
+        if (i > 0) beat += std::max(1.0, std::round((taps[i] - taps[i - 1]) / med));
+        const double y = taps[i] - taps[0];
+        n += 1; sx += beat; sy += y; sxx += beat * beat; sxy += beat * y;
+    }
+    const double den = n * sxx - sx * sx;
+    return den > 0.0 ? (n * sxy - sx * sy) / den : 0.0;
+}
+
 std::vector<ChopCandidate> ChopEngine::threshold(const SourceData& data, int64_t from, int64_t to,
                                                  float sensitivity, double minSeconds)
 {

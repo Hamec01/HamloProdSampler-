@@ -27,6 +27,7 @@ public:
 
     float flash = 0.0f;
     uint32_t lastHits = 0;
+    bool wasRendering = false;
 
 private:
     PadGrid& grid;
@@ -48,9 +49,15 @@ public:
     void refresh();
     void showPadMenu(int pad, juce::Component* target);
     void selectForEdit(int pad);
+    // PadMode::Cut: click or sweep over pads puts them into / takes them out of ui.cutPaint
+    void beginCutSweep(int pad);
+    void cutSweepTo(juce::Point<int> posInGrid);
+    void endCutSweep();
 
     HPSamplerProcessor& proc;
     std::function<void()> onOpenInspector;
+    std::function<void(int bank)> onEditBank;
+    void mouseDown(const juce::MouseEvent&) override; // right click on a bank button
     std::function<void(int pad)> onLocate; // switch to SRC view and show the region
 
 private:
@@ -66,7 +73,10 @@ private:
     juce::TextButton gateBtn { "GATE" }, oneShotBtn { "1-SHOT" }, toggleBtn { "TOGGLE" };
     juce::TextButton retrigBtn { "RETRIG" }, layerBtn { "LAYER" };
     juce::Label cutLabel;
-    juce::TextButton cutBtns[5];
+    juce::TextButton cutBtns[5], cutBankBtn { "BANK" }, cutPickBtn { "PICK" };
+    void applySweep(int pad);
+    int sweepGroup = -1;      // group being painted, -1 = no sweep
+    bool rightClick = false;  // JUCE buttons also "click" with the right button: that one only opens the menu
     juce::TextButton loopBtn { "LOOP" }, revBtn { "REV" }, inspectBtn { "PAD EDIT >" };
     juce::Label hint;
 };

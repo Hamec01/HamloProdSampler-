@@ -11,7 +11,12 @@ struct ChopCandidate
     int64_t start = 0, end = 0;  // source frames [start, end)
     float   score = 0.0f;        // 0..1
     juce::String origin;         // "Attack", "Tonal", "Phrase", "Beat", "Region", "Threshold", "Grid"
+    int64_t foundEnd = 0;        // end the tool (or the user's drag) gave; `end` is what the LENGTH mode makes of it
+    bool    manualEnd = false;   // the user dragged the end: LENGTH modes leave it alone
 };
+
+// How long a found chop sounds.
+enum class LengthMode : int { Found = 0, ToNext = 1, ToEnd = 2 };
 
 enum class SpotFocus { Hybrid, Attack, Tonal, Phrase };
 
@@ -32,6 +37,7 @@ struct SourceGrid // musical grid of a source (from effective BPM / origin)
     double bpm = 0.0;     // 0 = no grid
     double origin = 0.0;  // seconds of beat 1
     double sampleRate = 44100.0;
+    bool tentative = false; // no reliable source tempo: the grid is a guess (detected or project tempo)
     bool valid() const noexcept { return bpm > 20.0; }
     double framesPerBeat() const noexcept { return sampleRate * 60.0 / bpm; }
     double originFrame() const noexcept { return origin * sampleRate; }
@@ -48,6 +54,12 @@ public:
                                                  double beatsEach, const SourceGrid& grid);
     // SLICER / CHOP Regions — equal time parts of [from, to).
     static std::vector<ChopCandidate> equalRegions(int64_t from, int64_t to, int count);
+    // `count` equal parts of a musical length (the one closest to (to - from) / count), starting on the grid.
+    static std::vector<ChopCandidate> equalRegionsOnGrid(int64_t from, int64_t to, int count, int64_t numFrames,
+                                                         const SourceGrid& grid, double* beatsEach = nullptr);
+    static void applyLength(std::vector<ChopCandidate>& c, LengthMode mode, int64_t numFrames);
+    // Period of tapped beats (same unit as `taps`), 0 = not enough. A missed beat does not spoil the result.
+    static double tapPeriod(const std::vector<double>& taps);
     // CHOP Threshold — attack-driven cut points inside [from, to).
     static std::vector<ChopCandidate> threshold(const SourceData& data, int64_t from, int64_t to,
                                                 float sensitivity, double minSeconds);

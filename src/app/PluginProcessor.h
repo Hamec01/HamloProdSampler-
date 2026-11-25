@@ -20,8 +20,10 @@ struct UiState
     int mainTab = 0;                    // 0 = PATTERN, 1 = RESULT
     int bank = 0;
     int selectedPad = 0;
+    int editBank = -1;                  // >= 0: PAD EDIT and the pad strip change every pad of this bank
     int editingPad = -1;                // pad whose range is being edited on its source wave
-    enum class PadMode { Perform, Edit, Assign } padMode = PadMode::Perform;
+    enum class PadMode { Perform, Edit, Assign, Cut } padMode = PadMode::Perform;
+    int cutPaint = 1;                   // PadMode::Cut: the group that clicked pads join
     bool inspectorOpen = false;
     struct SrcView
     {
@@ -30,11 +32,16 @@ struct UiState
         int display = 0;                    // 0 WAVE, 1 SPEC, 2 SPLIT
         std::vector<ChopCandidate> candidates;
         int selectedCandidate = -1;
+        int64_t rangeFrom = -1, rangeTo = -1; // range of the last chop run (a clicked candidate is not a new range)
     };
     std::array<SrcView, kNumSources> src;
     SnapMode snap = SnapMode::Transient;
     bool autoAudition = true;
     bool loopAudition = false;
+    LengthMode chopLength = LengthMode::Found;
+    bool cutThrough = true;             // pads that play to the end of the sample cut each other
+    bool hearFitted = false;            // listen to sources at the project tempo / key
+    bool showGrid = true;
     std::vector<juce::String> selectedEvents;
     // MAIN editing (FL Piano-roll tools) and view
     enum class Tool { Draw, Paint, StepPaint, Delete, Mute, Slice, Select, Zoom, Play };
@@ -91,7 +98,21 @@ public:
     // pads
     void assignToPad(int pad, int slot, int64_t start, int64_t end, const juce::String& name = {});
     int  assignToNextEmptyPad(int slot, int64_t start, int64_t end);
-    int  mapCandidatesToEmptyPads(int slot, const std::vector<ChopCandidate>& c, int fromPad);
+    int  mapCandidatesToEmptyPads(int slot, const std::vector<ChopCandidate>& c, int fromPad, bool replace = false);
+    // What PAD EDIT changes: the selected pad, or all assigned pads of ui.editBank. The last change wins, per parameter.
+    std::vector<int> editTargets() const;
+    int editRefPad() const;             // the pad whose values are shown
+    juce::String editScopeName() const;
+    void editPads(const juce::String& label, const std::function<void(PadSettings&, int pad)>& fn);
+    // Quick cut groups. Pads that all are in the group already leave it.
+    enum class CutScope { Bank, Source, All };
+    std::vector<int> cutScopePads(CutScope scope) const;
+    int setCutGroup(CutScope scope, int group, bool toggle);
+    bool padPlaysToEnd(int pad) const;
+    void togglePadToEnd(int pad);
+    void listenersChanged() { listeners.call([](Listener& l) { l.projectChanged(); }); } // redraw after a UiState change
+    void updateFit() { syncEngine(); }
+    bool fitReady(int slot) const { return fitPublished[(size_t) slot] != 0; }
     void clearPad(int pad);
     void copyPad(int pad) { clipboard = project.state().pads[(size_t) pad]; hasClipboard = true; }
     void pastePad(int pad);
@@ -99,6 +120,7 @@ public:
     void releasePad(int pad, int pointer);
     PadSyncInfo padSyncInfo(int pad) const;
     double padSoundSeconds(int pad) const;
+    bool isPadRendering(int pad) const { return renderer.isRendering(pad); }
 
     // transport / recording
     void togglePlay();
@@ -119,8 +141,10 @@ public:
     void useSourceAsAnchor(int slot);
 
     // export
-    bool exportWav(const juce::File& f, juce::String& error);
+    bool exportWav(const juce::File& f, juce::String& error, double tailSeconds = 2.0);
     bool exportMidi(const juce::File& f, juce::String& error);
+    // A file to drop into the DAW. It stays on disk (Documents/HamloProd/HPSAMPLER/Drag): the DAW project refers to it.
+    juce::File writeDragFile(bool midi, juce::String& error);
     void renderResult(); // RESULT view (offline, message thread is fine for short loops)
     std::shared_ptr<juce::AudioBuffer<float>> resultAudio;
     uint64_t resultRevision = 0;
@@ -160,6 +184,8 @@ private:
     std::array<uint64_t, kNumPads> submittedKeys {};
     std::array<double, kNumPads> soundSeconds {};
     std::array<const void*, kNumSources> publishedPreview {};
+    std::array<uint64_t, kNumSources> fitSubmitted {}, fitPublished {}; // 0 = the original is heard
+    int throughCutGroup(const ProjectState& s, int slot, int64_t end) const; // 0 = no cut
     std::array<bool, kNumSources> loading {};
     double engineRate = 44100.0;
     bool recordArmed = false;
