@@ -161,6 +161,7 @@ juce::String Serialization::toJson(const ProjectState& s)
     so->setProperty("metronome", st.metronome);
     so->setProperty("masterDb", st.masterDb);
     so->setProperty("countIn", st.countIn);
+    so->setProperty("mainNeedsWindow", st.mainNeedsWindow);
     so->setProperty("hostPlays", (int) st.hostPlays);
     so->setProperty("hostCapture", (int) st.hostCapture);
     root->setProperty("settings", juce::var(so));
@@ -251,6 +252,7 @@ bool Serialization::fromJson(const juce::String& json, ProjectState& out, juce::
     st.metronome = get(so, "metronome", st.metronome);
     st.masterDb = juce::jlimit(-60.0f, 12.0f, get(so, "masterDb", st.masterDb));
     st.countIn = get(so, "countIn", st.countIn);
+    st.mainNeedsWindow = get(so, "mainNeedsWindow", st.mainNeedsWindow);
     st.hostPlays = (HostPlays) juce::jlimit(0, 2, get(so, "hostPlays", (int) st.hostPlays));
     st.hostCapture = (HostCapture) juce::jlimit(0, 2, get(so, "hostCapture", (int) st.hostCapture));
     out = s;

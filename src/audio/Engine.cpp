@@ -505,7 +505,16 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
     const bool rec = playing && (recording.load()
                      || (hostDriving && (s.hostCapture == HostCapture::Always
                                          || (s.hostCapture == HostCapture::WhenRecording && host.recording))));
-    const bool patternAudible = playing && !(hostDriving && s.hostPlays == HostPlays::DawNotes);
+    // Closed window: the DAW's Play does not start MAIN (DAW notes still play the pads). An export keeps what was before it.
+    if (!host.offline) windowLatched = windowOpen.load();
+    const bool gated = hostDriving && s.mainNeedsWindow && !windowLatched;
+    if (gated && !wasGated) // the window was closed while MAIN played
+    {
+        fadeTokens(kSeqToken);
+        for (auto& o : offs) o.active = false;
+    }
+    wasGated = gated;
+    const bool patternAudible = playing && !gated && !(hostDriving && s.hostPlays == HostPlays::DawNotes);
     // the DAW sends a note that MAIN plays anyway (recorded in both): one sound, MAIN's
     auto playedByMain = [&](int pad, int64_t tick)
     {
@@ -566,7 +575,7 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         }
         // metronome clicks on beats
         const bool counting = !hostDriving && startTick < 0.0;
-        if (s.metronome || counting)
+        if ((s.metronome && !gated) || counting)
         {
             const int64_t b0 = (int64_t) std::ceil(startTick / kPPQ), b1 = (int64_t) std::floor((endTick - 1e-9) / kPPQ);
             for (int64_t b = b0; b <= b1; ++b)
@@ -603,7 +612,7 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         {
             const bool fromDaw = hostDriving && (e.token & kMidiToken) != 0;
             const bool muted = fromDaw && ((s.hostPlays == HostPlays::Main && !rec)
-                                           || (s.hostPlays != HostPlays::DawNotes && playedByMain(e.pad, currentLoopTick(e.offset))));
+                                           || (s.hostPlays != HostPlays::DawNotes && !gated && playedByMain(e.pad, currentLoopTick(e.offset))));
             if (!muted) noteOn(s, e.pad, e.vel, e.token, live);
             if (live && !fromDaw && e.pad >= 0) livePad.store(e.pad);
             if (report) pushHit(RecordedHit::On, e, rec);

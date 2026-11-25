@@ -88,6 +88,7 @@ struct EngineSnapshot
     float    swing = 0.0f;
     bool     metronome = false;
     float    masterGain = 1.0f;
+    bool mainNeedsWindow = false;                  // MAIN follows the DAW only while windowOpen
     HostPlays hostPlays = HostPlays::Both;         // what sounds while the DAW plays
     HostCapture hostCapture = HostCapture::WhenRecording;
 };
@@ -154,6 +155,7 @@ public:
     // ----- UI read-outs (any thread) -----
     std::atomic<double> playheadTick { 0.0 };   // inside the loop
     std::atomic<bool>   transportPlaying { false };
+    std::atomic<bool>   windowOpen { false };   // set by the editor
     std::atomic<bool>   hostDriven { false };   // the DAW transport is running (the plug-in follows it)
     std::atomic<bool>   hostRecording { false };
     std::atomic<int>    countInBeat { 0 };      // 1..4 while the count-in runs, else 0
@@ -249,6 +251,7 @@ private:
     bool wasPlaying = false;
     bool wasHostDriving = false;
     bool hostDriving = false;
+    bool windowLatched = false, wasGated = false;
     uint32_t pass = 0;
     struct Recent { int pad = -1; int64_t loopTick = 0; double absTick = 0; }; // hits of this pass: not played again by MAIN
     std::array<Recent, 64> recents {};

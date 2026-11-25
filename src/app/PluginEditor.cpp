@@ -2,6 +2,14 @@
 
 #include <BinaryData.h>
 
+#if defined(_WIN32)
+ #ifndef NOMINMAX
+  #define NOMINMAX
+ #endif
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+#endif
+
 namespace hps
 {
 void NavButton::paint(juce::Graphics& g)
@@ -111,6 +119,8 @@ HPSamplerEditor::HPSamplerEditor(HPSamplerProcessor& p) : juce::AudioProcessorEd
 
 HPSamplerEditor::~HPSamplerEditor()
 {
+    stopTimer();
+    proc.engine.windowOpen = false;
     proc.removeListener(this);
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
     setLookAndFeel(nullptr);
@@ -211,8 +221,19 @@ void HPSamplerEditor::statusChanged()
     for (auto* b : srcBtns) b->repaint();
 }
 
+void HPSamplerEditor::updateWindowOpen()
+{
+    bool open = isShowing();
+   #if JUCE_WINDOWS
+    // a host may only hide its own window around the editor
+    if (open) if (auto* peer = getPeer()) open = ::IsWindowVisible((HWND) peer->getNativeHandle()) != 0;
+   #endif
+    proc.engine.windowOpen = open;
+}
+
 void HPSamplerEditor::timerCallback()
 {
+    updateWindowOpen();
     // keep loading indicators fresh
     for (int i = 0; i < kNumSources; ++i) if (proc.isSourceLoading(i)) srcBtns[i]->repaint();
     // every 2 s: how many HPDG can be connected (shown on the button)

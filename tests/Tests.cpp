@@ -267,6 +267,37 @@ void testDawNotes()
     CHECK(rec == 1, "DAW record: the note is recorded");
 }
 
+void testWindowClosed()
+{
+    auto s = baseSnapshot();
+    s.loopTicks = kTicksPerBar;
+    s.mainNeedsWindow = true;
+    s.events = { { 0, 0, 240, 1.0f }, { 0, kPPQ, 240, 1.0f }, { 0, kPPQ * 2, 240, 1.0f }, { 0, kPPQ * 3, 240, 1.0f } };
+    Rig r(s, 480000);
+    r.host.valid = true; r.host.playing = true; r.host.bpm = 120.0;
+    auto beat = [&](bool note = false) // 94 blocks = one beat
+    {
+        if (note) r.midi.addEvent(juce::MidiMessage::noteOn(1, kBaseMidiNote, (juce::uint8) 100), 0);
+        for (int i = 0; i < 94; ++i) { r.block(); r.host.ppq += 256 / kSr * 2.0; }
+    };
+    auto hits = [&] { return (int) r.e.padHits[0].load(); };
+    beat(); beat();
+    CHECK(hits() == 0 && r.voices(0) == 0, "window closed: DAW Play does not start MAIN");
+    beat(true);
+    CHECK(hits() == 1 && r.voices(0) == 1, "window closed: a DAW note plays the pad, also where MAIN has the same note");
+    r.host.playing = false; for (int i = 0; i < 20; ++i) r.block();
+    CHECK(r.voices(0) == 0, "DAW stop = silence");
+    r.e.windowOpen = true; r.host.playing = true; r.host.ppq = 0.0;
+    beat(); beat();
+    CHECK(hits() >= 3, "window open: MAIN follows the DAW");
+    r.e.windowOpen = false; const int h = hits();
+    beat(); beat();
+    CHECK(hits() == h && r.voices(0) == 0, "closing the window silences MAIN");
+    r.host.playing = false; for (int i = 0; i < 20; ++i) r.block();
+    r.e.setInternalPlaying(true, true); for (int i = 0; i < 8; ++i) r.block();
+    CHECK(hits() == h + 1, "the plug-in's own PLAY is not affected");
+}
+
 void testCountIn()
 {
     auto s = baseSnapshot();
@@ -756,6 +787,7 @@ int main(int argc, char** argv)
     testSequencerAndRecord();
     testTransportPriority();
     testDawNotes();
+    testWindowClosed();
     testCountIn();
     testNoDoubleAfterRecord();
     testRendererSync();

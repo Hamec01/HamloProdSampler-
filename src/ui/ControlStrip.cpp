@@ -231,6 +231,7 @@ void ControlStrip::nowMenu()
     m.addItem(1, "MAIN + DAW notes (a note that is in both sounds once)", true, st.hostPlays == HostPlays::Both);
     m.addItem(2, "Only MAIN (DAW notes are ignored unless recording)", true, st.hostPlays == HostPlays::Main);
     m.addItem(3, "Only DAW notes (MAIN is silent)", true, st.hostPlays == HostPlays::DawNotes);
+    m.addItem(5, "MAIN follows the DAW only while this window is open", true, st.mainNeedsWindow);
     m.addSectionHeader("Write DAW notes and pads into MAIN");
     m.addItem(11, "When the DAW records", true, st.hostCapture == HostCapture::WhenRecording);
     m.addItem(12, "Always while the DAW plays", true, st.hostCapture == HostCapture::Always);
@@ -238,6 +239,7 @@ void ControlStrip::nowMenu()
     m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&now), [this](int r)
     {
         if (r >= 10) proc.project.edit("DAW capture", [r](ProjectState& s) { s.settings.hostCapture = (HostCapture) (r - 10); });
+        else if (r == 5) proc.project.edit("DAW role", [](ProjectState& s) { s.settings.mainNeedsWindow = !s.settings.mainNeedsWindow; });
         else if (r >= 1) proc.project.edit("DAW role", [r](ProjectState& s) { s.settings.hostPlays = (HostPlays) (r - 1); });
     });
 }

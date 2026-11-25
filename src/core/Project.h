@@ -108,6 +108,7 @@ struct ProjectSettings
     float      masterDb = 0.0f;
     bool       countIn = true;      // 1-2-3-4 before recording
     HostPlays  hostPlays = HostPlays::Both;
+    bool       mainNeedsWindow = true; // the DAW's Play starts MAIN only while the plug-in window is open
     HostCapture hostCapture = HostCapture::WhenRecording;
 };
 

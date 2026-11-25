@@ -208,6 +208,7 @@ std::unique_ptr<EngineSnapshot> HPSamplerProcessor::buildSnapshot() const
     s->swing = st.settings.swing;
     s->metronome = st.settings.metronome;
     s->masterGain = (float) dbToGain(st.settings.masterDb);
+    s->mainNeedsWindow = st.settings.mainNeedsWindow && wrapperType != wrapperType_Standalone;
     s->hostPlays = st.settings.hostPlays;
     s->hostCapture = st.settings.hostCapture;
     return s;
