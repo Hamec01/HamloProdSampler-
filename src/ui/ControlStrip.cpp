@@ -10,7 +10,7 @@ void DisplayChip::paint(juce::Graphics& g)
     g.setColour(theme::textDim);
     g.setFont(theme::ui(10.0f, true));
     g.drawText(caption, in.removeFromTop(12), juce::Justification::topLeft);
-    g.setColour(theme::accent);
+    g.setColour(valueColour);
     g.setFont(theme::mono(19.0f, true));
     g.drawFittedText(value, in.removeFromTop(22), juce::Justification::centredLeft, 1, 0.7f);
     g.setColour(subColour);
@@ -46,11 +46,14 @@ void DisplayChip::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWhe
 
 ControlStrip::ControlStrip(HPSamplerProcessor& p) : proc(p)
 {
-    for (auto* c : { &bpm, &key, &grid, &sync }) addAndMakeVisible(*c);
+    for (auto* c : { &now, &bpm, &key, &grid, &sync }) addAndMakeVisible(*c);
     bpm.caption = "PROJECT BPM";
     key.caption = "PROJECT KEY";
     grid.caption = "GRID";
     sync.caption = "SYNC";
+    now.caption = "NOW PLAYING";
+    now.setTooltip("Who plays right now: the DAW, MAIN, a source audition or a pad. Click: what sounds while the DAW plays, and when DAW notes are written into MAIN.");
+    now.onClick = [this] { nowMenu(); };
     bpm.setTooltip("Project tempo. Drag up/down or wheel (Shift = 0.1). Click for options.");
     key.setTooltip("Target key: tonal pads are transposed to it (SYNC STRETCH). Click to choose.");
     grid.setTooltip("Musical grid for SRC snapping and MAIN editing. Click to choose.");
@@ -82,9 +85,19 @@ ControlStrip::ControlStrip(HPSamplerProcessor& p) : proc(p)
     recBtn.getProperties().set("led", (juce::int64) theme::rec.getARGB());
     playBtn.getProperties().set("led", (juce::int64) theme::ok.getARGB());
     playBtn.onClick = [this] { proc.togglePlay(); };
+    stopBtn.setTooltip("Stops everything in the plug-in (the DAW itself is stopped in the DAW)");
     stopBtn.onClick = [this] { proc.stop(); proc.engine.panic(); };
     recBtn.setTooltip("Record pad / MIDI hits into the pattern (overdub). Starts the transport if needed.");
     recBtn.onClick = [this] { proc.setRecordArmed(!proc.isRecordArmed()); refresh(); };
+    countBtn.setTooltip("Count-in: four clicks (1-2-3-4) before REC starts MAIN. While the DAW plays, its own count-in is used.");
+    countBtn.setWantsKeyboardFocus(false);
+    addAndMakeVisible(countBtn);
+    countBtn.onClick = [this] { proc.project.mutate([](ProjectState& s) { s.settings.countIn = !s.settings.countIn; }); };
+    captureBtn.setTooltip("Writes what you just played (pads / DAW notes while the DAW or MAIN ran) into MAIN, even if REC was off");
+    captureBtn.getProperties().set("led", (juce::int64) theme::warn.getARGB());
+    captureBtn.setWantsKeyboardFocus(false);
+    addAndMakeVisible(captureBtn);
+    captureBtn.onClick = [this] { proc.captureTake(); };
     metroBtn.onClick = [this] { proc.project.mutate([](ProjectState& s) { s.settings.metronome = !s.settings.metronome; }); };
 
     cutLabel.setText("CUT", juce::dontSendNotification);
@@ -136,7 +149,7 @@ ControlStrip::ControlStrip(HPSamplerProcessor& p) : proc(p)
     swing.onValueChange = [this] { const float v = (float) swing.getValue(); proc.project.edit("Swing", [v](ProjectState& s) { s.settings.swing = v; }); };
     addAndMakeVisible(swing);
     master.setSliderStyle(juce::Slider::LinearHorizontal);
-    master.setTextBoxStyle(juce::Slider::TextBoxRight, false, 48, 18);
+    master.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 56, 16);
     master.setRange(-36.0, 6.0, 0.1);
     master.setTextValueSuffix(" dB");
     master.setTooltip("Master level");
@@ -144,9 +157,6 @@ ControlStrip::ControlStrip(HPSamplerProcessor& p) : proc(p)
     master.onDragEnd = [this] { proc.project.endGesture(); };
     master.onValueChange = [this] { const float v = (float) master.getValue(); proc.project.edit("Master", [v](ProjectState& s) { s.settings.masterDb = v; }); };
     addAndMakeVisible(master);
-    posLabel.setFont(theme::mono(15.0f, true));
-    posLabel.setColour(juce::Label::textColourId, theme::accent);
-    addAndMakeVisible(posLabel);
     startTimerHz(20);
     refresh();
 }
@@ -175,6 +185,7 @@ void ControlStrip::refresh()
     cutAll.setToggleState(st.mono == MonoMode::All, juce::dontSendNotification);
     gateDef.setToggleState(st.defaultMode == PlayMode::Gate, juce::dontSendNotification);
     oneDef.setToggleState(st.defaultMode == PlayMode::OneShot, juce::dontSendNotification);
+    countBtn.setToggleState(st.countIn, juce::dontSendNotification);
     metroBtn.setToggleState(st.metronome, juce::dontSendNotification);
     recBtn.setToggleState(proc.isRecordArmed(), juce::dontSendNotification);
     int q = 1;
@@ -186,15 +197,49 @@ void ControlStrip::refresh()
 
 void ControlStrip::timerCallback()
 {
-    const bool playing = proc.engine.transportPlaying.load();
-    playBtn.setToggleState(playing, juce::dontSendNotification);
-    recBtn.setToggleState(proc.isRecordArmed(), juce::dontSendNotification);
-    const double t = proc.engine.playheadTick.load();
-    const int bar = (int) (t / kTicksPerBar) + 1, beat = (int) std::fmod(t / kPPQ, 4.0) + 1;
-    posLabel.setText(playing ? juce::String(bar) + "." + juce::String(beat) + (proc.engine.hostDriven.load() ? "  DAW" : "") : "--.-", juce::dontSendNotification);
-    static double lastHost = -1;
+    const auto n = proc.nowPlaying();
+    using Who = HPSamplerProcessor::NowPlaying::Who;
+    const auto col = n.who == Who::Daw ? (proc.engine.hostRecording.load() ? theme::rec : theme::ok)
+                   : n.who == Who::Main ? theme::accent : n.who == Who::Nothing ? theme::textDim : theme::wave;
+    if (n.title != now.value || n.detail != now.sub || now.valueColour != col)
+    {
+        now.value = n.title; now.sub = n.detail; now.valueColour = col; now.subColour = col.withAlpha(0.85f);
+        now.repaint();
+    }
+    playBtn.setToggleState(n.who == Who::Main, juce::dontSendNotification);
+    playBtn.setEnabled(n.who != Who::Daw); // the DAW leads
+    recBtn.setToggleState(proc.isRecordArmed() || (proc.engine.hostRecording.load()
+                          && proc.project.state().settings.hostCapture != HostCapture::Off), juce::dontSendNotification);
+    if (++captureTick >= 6)
+    {
+        captureTick = 0;
+        const int cap = proc.captureCount();
+        const auto t = cap > 0 ? "CAPTURE " + juce::String(cap) : juce::String("CAPTURE");
+        if (captureBtn.getButtonText() != t) captureBtn.setButtonText(t);
+        captureBtn.setToggleState(cap > 0, juce::dontSendNotification);
+        captureBtn.setEnabled(cap > 0);
+    }
     const double hb = proc.engine.hostBpm.load();
     if (std::abs(hb - lastHost) > 0.01) { lastHost = hb; refresh(); }
+}
+
+void ControlStrip::nowMenu()
+{
+    const auto& st = proc.project.state().settings;
+    juce::PopupMenu m;
+    m.addSectionHeader("While the DAW plays, you hear");
+    m.addItem(1, "MAIN + DAW notes (a note that is in both sounds once)", true, st.hostPlays == HostPlays::Both);
+    m.addItem(2, "Only MAIN (DAW notes are ignored unless recording)", true, st.hostPlays == HostPlays::Main);
+    m.addItem(3, "Only DAW notes (MAIN is silent)", true, st.hostPlays == HostPlays::DawNotes);
+    m.addSectionHeader("Write DAW notes and pads into MAIN");
+    m.addItem(11, "When the DAW records", true, st.hostCapture == HostCapture::WhenRecording);
+    m.addItem(12, "Always while the DAW plays", true, st.hostCapture == HostCapture::Always);
+    m.addItem(10, "Only with REC / CAPTURE", true, st.hostCapture == HostCapture::Off);
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&now), [this](int r)
+    {
+        if (r >= 10) proc.project.edit("DAW capture", [r](ProjectState& s) { s.settings.hostCapture = (HostCapture) (r - 10); });
+        else if (r >= 1) proc.project.edit("DAW role", [r](ProjectState& s) { s.settings.hostPlays = (HostPlays) (r - 1); });
+    });
 }
 
 void ControlStrip::bpmMenu()
@@ -299,9 +344,9 @@ void ControlStrip::paint(juce::Graphics& g)
 void ControlStrip::resized()
 {
     auto r = getLocalBounds().reduced(6, 3);
-    const int chipW = juce::jmin(170, r.getWidth() / 9);
-    for (auto* c : { &bpm, &key, &grid, &sync }) c->setBounds(r.removeFromLeft(chipW));
-    r.removeFromLeft(10);
+    const int chipW = juce::jlimit(84, 140, (r.getWidth() - 686 - 84) / 5);
+    for (auto* c : { &now, &bpm, &key, &grid, &sync }) c->setBounds(r.removeFromLeft(chipW));
+    r.removeFromLeft(6);
     auto col = [&](int w) { return r.removeFromLeft(w); };
     auto tr = col(250);
     auto trTop = tr.removeFromTop(tr.getHeight() / 2 + 4);
@@ -309,27 +354,28 @@ void ControlStrip::resized()
     stopBtn.setBounds(trTop.removeFromLeft(58).reduced(2));
     recBtn.setBounds(trTop.removeFromLeft(54).reduced(2));
     metroBtn.setBounds(trTop.removeFromLeft(66).reduced(2));
-    posLabel.setBounds(tr.removeFromLeft(90));
-    swingLabel.setBounds(tr.removeFromLeft(44));
+    captureBtn.setBounds(tr.removeFromLeft(92).reduced(2, 1));
+    countBtn.setBounds(tr.removeFromLeft(58).reduced(2, 1));
+    swingLabel.setBounds(tr.removeFromLeft(42));
     swing.setBounds(tr.reduced(2));
 
-    r.removeFromLeft(8);
-    auto cut = col(190);
+    r.removeFromLeft(4);
+    auto cut = col(186);
     cutLabel.setBounds(cut.removeFromTop(14));
     auto cb = cut.reduced(0, 2);
     cutOff.setBounds(cb.removeFromLeft(50).reduced(2));
     cutSrc.setBounds(cb.removeFromLeft(76).reduced(2));
     cutAll.setBounds(cb.reduced(2));
 
-    auto md = col(130);
+    auto md = col(124);
     modeLabel.setBounds(md.removeFromTop(14));
     auto mb = md.reduced(0, 2);
     gateDef.setBounds(mb.removeFromLeft(58).reduced(2));
     oneDef.setBounds(mb.reduced(2));
 
-    auto q = col(130);
+    auto q = col(120);
     qLabel.setBounds(q.removeFromTop(14));
     recQ.setBounds(q.reduced(2, 6));
-    master.setBounds(r.reduced(4, 14));
+    master.setBounds(r.reduced(2, 8));
 }
 } // namespace hps

@@ -45,6 +45,7 @@ private:
     void projectChanged() override;
     void statusChanged() override;
     void timerCallback() override;
+    bool handleSpace();
     void showView(int view);
     void showBridgeMenu();
     void bridgeButtonClicked();

@@ -38,7 +38,7 @@ hpbridge::SamplerContextSnapshot BridgeAdapter::buildSamplerContext(const Projec
     const int64_t loop = (int64_t) st.settings.patternBars * kTicksPerBar;
     for (const auto& e : st.events)
     {
-        if (e.tick >= loop || !st.pads[(size_t) e.pad].assigned) continue;
+        if (e.muted || e.tick >= loop || !st.pads[(size_t) e.pad].assigned) continue;
         const auto& p = st.pads[(size_t) e.pad];
         hpbridge::PatternEventDto d;
         d.tick = e.tick;

@@ -29,6 +29,15 @@ enum class MonoMode : int { Off = 0, PerSource = 1, All = 2 };
 // How a pad follows the project tempo.
 enum class SyncMode : int { Off = 0, Repitch = 1, Stretch = 2 };
 
+// What sounds while the DAW transport runs.
+enum class HostPlays : int { Both = 0, Main = 1, DawNotes = 2 };
+
+// When notes played while the DAW runs are written into MAIN by themselves.
+enum class HostCapture : int { Off = 0, WhenRecording = 1, Always = 2 };
+
+// The same pad within this distance is the same hit (a note recorded in the DAW and in MAIN).
+inline constexpr int64_t kSameHitTicks = 60;
+
 enum class GridDiv : int { Bar, Half, Quarter, Eighth, Sixteenth, ThirtySecond, EighthT, SixteenthT, Off };
 
 inline int gridTicks(GridDiv g) noexcept

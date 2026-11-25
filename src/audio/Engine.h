@@ -71,6 +71,7 @@ struct EngineEvent
     int64_t tick = 0;
     int64_t length = 240;
     float   velocity = 0.9f;
+    int64_t rawTick = -1;   // played timing of a recorded note (used to never play one hit twice)
 };
 
 struct EngineSnapshot
@@ -85,6 +86,8 @@ struct EngineSnapshot
     float    swing = 0.0f;
     bool     metronome = false;
     float    masterGain = 1.0f;
+    HostPlays hostPlays = HostPlays::Both;         // what sounds while the DAW plays
+    HostCapture hostCapture = HostCapture::WhenRecording;
 };
 
 struct PreviewSource
@@ -101,6 +104,9 @@ struct RecordedHit
     int64_t  tick = 0;    // position inside the pattern loop (raw, unquantized)
     float    velocity = 0.9f;
     uint32_t token = 0;
+    bool     rec = false;   // recording was on (else: only remembered for CAPTURE)
+    bool     host = false;  // the DAW transport was running
+    uint32_t pass = 0;      // increments on every transport start
 };
 
 struct HostTransport
@@ -109,6 +115,8 @@ struct HostTransport
     bool   playing = false;
     double ppq = 0.0;
     double bpm = 120.0;
+    bool   recording = false; // the DAW records
+    bool   offline = false;   // the DAW renders to a file
 };
 
 class Engine
@@ -116,6 +124,7 @@ class Engine
 public:
     static constexpr int kMaxVoices = 48;
     static constexpr uint32_t kGuiToken = 0x10000u, kMidiToken = 0x20000u, kSeqToken = 0x40000u;
+    static constexpr int kAuditionPointer = 0x40; // GUI pointers with this bit only listen: never recorded
 
     Engine();
 
@@ -130,6 +139,9 @@ public:
     void previewRange(int slot, int64_t start, int64_t end, bool loop);
     void stopPreview();
     void setInternalPlaying(bool shouldPlay, bool fromStart = false);
+    void playFrom(int64_t loopTick); // internal transport from a position (Playback tool)
+    void playWithCountIn();          // one bar of clicks (1-2-3-4), then MAIN from bar 1
+    void stopAll();                  // audition + live pads + MAIN; what the DAW plays goes on
     void setRecording(bool shouldRecord) { recording.store(shouldRecord); }
     void panic();
 
@@ -139,7 +151,12 @@ public:
     // ----- UI read-outs (any thread) -----
     std::atomic<double> playheadTick { 0.0 };   // inside the loop
     std::atomic<bool>   transportPlaying { false };
-    std::atomic<bool>   hostDriven { false };
+    std::atomic<bool>   hostDriven { false };   // the DAW transport is running (the plug-in follows it)
+    std::atomic<bool>   hostRecording { false };
+    std::atomic<int>    countInBeat { 0 };      // 1..4 while the count-in runs, else 0
+    std::atomic<int>    liveVoices { 0 };       // pads played by hand (not by MAIN / the DAW)
+    std::atomic<int>    livePad { -1 };         // the last of them
+    std::atomic<uint32_t> hostMidiNotes { 0 };  // notes received from the DAW while it plays
     std::atomic<double> previewFrame { -1.0 };  // source frame of the audition, -1 = none
     std::atomic<int>    previewSlot { -1 };
     std::atomic<float>  outputPeak { 0.0f };
@@ -181,7 +198,7 @@ private:
     };
     struct Cmd
     {
-        enum Type : uint8_t { PadOn, PadOff, Preview, PreviewStop, Play, Stop, Panic } type = PadOn;
+        enum Type : uint8_t { PadOn, PadOff, Preview, PreviewStop, Play, Stop, Panic, StopAll } type = PadOn;
         int pad = 0;
         float vel = 1.0f;
         uint32_t token = 0;
@@ -200,6 +217,8 @@ private:
     void renderPreview(float* L, float* R, int n);
     void renderClick(float* L, float* R, int n);
     void freeVoice(Voice& v);
+    void stopPreviewNow() { if (previewActive) previewStopping = true; }
+    void pushHit(RecordedHit::Type type, const Ev& e, bool rec);
     int64_t currentLoopTick(int offset) const noexcept;
 
     double sr = 44100.0;
@@ -225,6 +244,12 @@ private:
     double blockStartTick = 0.0;  // absolute ticks at block start
     double ticksPerSample = 0.0;
     bool wasPlaying = false;
+    bool wasHostDriving = false;
+    bool hostDriving = false;
+    uint32_t pass = 0;
+    struct Recent { int pad = -1; int64_t loopTick = 0; double absTick = 0; }; // hits of this pass: not played again by MAIN
+    std::array<Recent, 64> recents {};
+    int recentPos = 0;
     double lastEndTick = -1.0;
     int64_t loopTicks = kTicksPerBar * 4;
 

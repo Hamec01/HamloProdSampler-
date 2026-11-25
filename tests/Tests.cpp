@@ -182,6 +182,141 @@ void testSequencerAndRecord()
     CHECK(seqRec == 0, "sequencer playback is not re-recorded (no feedback)");
 }
 
+std::unique_ptr<PreviewSource> previewSound()
+{
+    auto p = std::make_unique<PreviewSource>();
+    auto a = std::make_shared<juce::AudioBuffer<float>>(2, 480000);
+    for (int c = 0; c < 2; ++c) juce::FloatVectorOperations::fill(a->getWritePointer(c), 0.3f, 480000);
+    p->audio = a;
+    p->sampleRate = kSr;
+    return p;
+}
+
+// one thing at a time: pad / audition / MAIN / DAW
+void testTransportPriority()
+{
+    auto s = baseSnapshot();
+    s.loopTicks = kTicksPerBar;
+    s.events = { { 0, 0, 240, 1.0f } };
+    Rig r(s, 480000);
+    r.e.publishPreviewSource(0, previewSound());
+    auto run = [&](int n = 8) { for (int i = 0; i < n; ++i) r.block(); };
+    auto preview = [&] { return r.e.previewFrame.load() >= 0.0; };
+
+    r.e.previewRange(0, 0, 400000, true); run();
+    CHECK(preview(), "audition plays");
+    r.e.padDown(1, 1.0f); run();
+    CHECK(!preview() && r.voices(1) == 1 && r.e.liveVoices.load() == 1, "a pad ends the audition");
+    r.e.previewRange(0, 0, 400000, true); run();
+    CHECK(preview() && r.voices(1) == 0, "an audition ends the pad");
+    r.e.padDown(1, 1.0f); run();
+    r.e.stopAll(); run();
+    CHECK(!preview() && r.voices(1) == 0 && r.e.liveVoices.load() == 0 && r.buf.getMagnitude(0, 256) < 1.0e-4f, "stop = silence");
+    r.e.padDown(1, 1.0f); r.e.stopAll(); run();
+    CHECK(r.voices(1) == 0, "pad + stop in one block = silence");
+    r.e.padDown(1, 1.0f); run();
+    r.e.previewRange(0, 0, 400000, true); r.e.setInternalPlaying(true, true); run();
+    CHECK(!preview() && r.voices(1) == 0 && r.voices(0) == 1, "MAIN ends pad and audition");
+    r.e.previewRange(0, 0, 400000, true); run();
+    CHECK(preview() && !r.e.transportPlaying.load() && r.voices(0) == 0, "an audition ends MAIN");
+
+    // the DAW takes over; MAIN cannot start next to it and does not come back after it
+    r.e.setInternalPlaying(true, true); run();
+    r.host.valid = true; r.host.playing = true; r.host.bpm = 120.0; r.host.ppq = 1.0;
+    auto daw = [&](int n = 8) { for (int i = 0; i < n; ++i) { r.block(); r.host.ppq += 256 / kSr * 2.0; } };
+    daw();
+    CHECK(r.e.hostDriven.load() && !preview(), "the DAW leads");
+    r.e.setInternalPlaying(true, true); daw();
+    r.midi.addEvent(juce::MidiMessage::noteOn(1, kBaseMidiNote + 2, (juce::uint8) 100), 0); daw();
+    r.e.stopAll(); daw();
+    CHECK(r.voices(2) == 1, "Space never cuts what the DAW plays");
+    r.host.playing = false; run();
+    CHECK(!r.e.transportPlaying.load() && r.voices(0) + r.voices(2) == 0, "DAW stop = everything it played stops, MAIN does not start by itself");
+}
+
+void testDawNotes()
+{
+    auto s = baseSnapshot();
+    s.loopTicks = kTicksPerBar;
+    s.events = { { 0, kPPQ, 240, 1.0f, kPPQ - 100 } }; // recorded 100 ticks early, quantized to beat 2
+    auto play = [&](HostPlays hp, bool midi, bool dawRec, int& hitsRec, int& hitsAll)
+    {
+        s.hostPlays = hp;
+        Rig r(s);
+        r.host.valid = true; r.host.playing = true; r.host.bpm = 120.0; r.host.recording = dawRec;
+        hitsRec = hitsAll = 0;
+        for (int i = 0; i < 375; ++i) // 2 s = one bar
+        {
+            r.host.ppq = i * 256 / kSr * 2.0;
+            const double next = (i + 1) * 256 / kSr * 2.0, at = (kPPQ - 100) / (double) kPPQ;
+            if (midi && r.host.ppq <= at && at < next) r.midi.addEvent(juce::MidiMessage::noteOn(1, kBaseMidiNote, (juce::uint8) 100), 0);
+            r.block();
+        }
+        RecordedHit h;
+        while (r.e.popRecordedHit(h)) { ++hitsAll; if (h.rec) ++hitsRec; }
+        return (int) r.e.padHits[0].load();
+    };
+    int rec = 0, all = 0;
+    CHECK(play(HostPlays::Both, true, false, rec, all) == 1, "the same note in MAIN and in the DAW sounds once");
+    CHECK(all == 1 && rec == 0, "not recording: the note is only remembered for CAPTURE");
+    CHECK(play(HostPlays::Main, true, false, rec, all) == 1, "MAIN only");
+    CHECK(play(HostPlays::DawNotes, true, false, rec, all) == 1, "DAW notes only");
+    CHECK(play(HostPlays::DawNotes, false, false, rec, all) == 0, "DAW notes only: MAIN is silent");
+    play(HostPlays::Both, true, true, rec, all);
+    CHECK(rec == 1, "DAW record: the note is recorded");
+}
+
+void testCountIn()
+{
+    auto s = baseSnapshot();
+    s.loopTicks = kTicksPerBar;
+    s.bpm = 120.0;
+    s.events = { { 0, 0, 240, 1.0f }, { 0, kTicksPerBar - 480, 240, 1.0f } };
+    Rig r(s);
+    r.e.setRecording(true);
+    r.e.playWithCountIn();
+    int seen = 0, clicks = 0, last = 0;
+    for (int i = 0; i < 374; ++i) // 2 s minus one block: 1-2-3-4
+    {
+        if (i == 100) r.e.padDown(1, 1.0f);
+        if (i == 368) r.e.padDown(2, 1.0f);
+        r.block();
+        const int b = r.e.countInBeat.load();
+        if (b != last) { ++seen; CHECK(b == last + 1, "count-in beats in order"); last = b; }
+        if (r.buf.getMagnitude(0, 256) > 0.2f && i < 90 && i % 94 == 0) ++clicks;
+    }
+    CHECK(seen == 4 && last == 4, "count-in 1-2-3-4");
+    CHECK(clicks > 0, "count-in clicks without METRO");
+    CHECK(r.e.padHits[0].load() == 0, "MAIN is silent during the count-in");
+    for (int i = 0; i < 4; ++i) r.block();
+    CHECK(r.e.countInBeat.load() == 0 && r.e.padHits[0].load() == 1, "MAIN starts on the one");
+    int ons = 0; int64_t tick = -1;
+    RecordedHit h;
+    while (r.e.popRecordedHit(h)) if (h.type == RecordedHit::On) { ++ons; tick = h.tick; }
+    CHECK(ons == 1 && tick == 0, "count-in hits are not recorded, one just before the 'one' lands on it");
+}
+
+// a hit that was quantized forward must not sound a second time in the same pass
+void testNoDoubleAfterRecord()
+{
+    auto s = baseSnapshot();
+    s.loopTicks = kTicksPerBar;
+    s.bpm = 120.0;
+    Rig r(s);
+    r.e.setRecording(true);
+    r.e.setInternalPlaying(true, true);
+    for (int i = 0; i < 20; ++i) r.block();
+    r.e.padDown(0, 1.0f); r.block();
+    RecordedHit h;
+    CHECK(r.e.popRecordedHit(h) && h.rec, "hit recorded");
+    s.events = { { 0, h.tick + 150, 240, 1.0f, h.tick } };
+    r.e.publishSnapshot(std::make_unique<EngineSnapshot>(s));
+    for (int i = 0; i < 60; ++i) r.block();
+    CHECK(r.e.padHits[0].load() == 1, "quantized note is not doubled in the pass it was played");
+    for (int i = 0; i < 375; ++i) r.block();
+    CHECK(r.e.padHits[0].load() == 2, "... and plays in the next pass");
+}
+
 std::shared_ptr<juce::AudioBuffer<float>> sine(double hz, double seconds, double sr)
 {
     auto b = std::make_shared<juce::AudioBuffer<float>>(2, (int) (seconds * sr));
@@ -546,6 +681,10 @@ int main(int argc, char** argv)
     testMidiTokens();
     testChokeAndMono();
     testSequencerAndRecord();
+    testTransportPriority();
+    testDawNotes();
+    testCountIn();
+    testNoDoubleAfterRecord();
     testRendererSync();
     testKeyTranspose();
     testPadSpeed();

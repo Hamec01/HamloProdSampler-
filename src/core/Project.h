@@ -86,6 +86,7 @@ struct PatternEvent
     int64_t rawTick = -1;      // recorded human timing (>= 0 for recorded events)
     int64_t length = kPPQ / 4; // trigger length (Gate: note-off; OneShot: ignored by audio)
     float   velocity = 0.9f;
+    bool    muted = false;
 };
 
 struct ProjectSettings
@@ -105,6 +106,9 @@ struct ProjectSettings
     GridDiv    recGrid = GridDiv::Sixteenth;
     bool       metronome = false;
     float      masterDb = 0.0f;
+    bool       countIn = true;      // 1-2-3-4 before recording
+    HostPlays  hostPlays = HostPlays::Both;
+    HostCapture hostCapture = HostCapture::WhenRecording;
 };
 
 struct ProjectState

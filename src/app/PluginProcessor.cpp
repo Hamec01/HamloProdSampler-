@@ -118,9 +118,11 @@ void HPSamplerProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mi
             host.playing = pos->getIsPlaying();
             host.ppq = pos->getPpqPosition().orFallback(0.0);
             host.bpm = pos->getBpm().orFallback(0.0);
+            host.recording = pos->getIsRecording();
             if (!pos->getPpqPosition().hasValue()) host.playing = false;
         }
     }
+    host.offline = isNonRealtime();
     engine.process(buffer, midi, host);
     midi.clear();
 }
@@ -182,13 +184,15 @@ std::unique_ptr<EngineSnapshot> HPSamplerProcessor::buildSnapshot() const
     s->mono = st.settings.mono;
     s->loopTicks = (int64_t) st.settings.patternBars * kTicksPerBar;
     for (const auto& ev : st.events)
-        if (ev.tick < s->loopTicks && st.pads[(size_t) ev.pad].assigned)
-            s->events.push_back({ ev.pad, ev.tick, ev.length, ev.velocity });
+        if (!ev.muted && ev.tick < s->loopTicks && st.pads[(size_t) ev.pad].assigned)
+            s->events.push_back({ ev.pad, ev.tick, ev.length, ev.velocity, ev.rawTick });
     std::sort(s->events.begin(), s->events.end(), [](const auto& a, const auto& b) { return a.tick < b.tick; });
     s->bpm = st.settings.bpm;
     s->swing = st.settings.swing;
     s->metronome = st.settings.metronome;
     s->masterGain = (float) dbToGain(st.settings.masterDb);
+    s->hostPlays = st.settings.hostPlays;
+    s->hostCapture = st.settings.hostCapture;
     return s;
 }
 
@@ -223,6 +227,20 @@ void HPSamplerProcessor::timerCallback()
 {
     handleRecordedHits();
     engine.collectGarbage();
+    const bool daw = engine.hostDriven.load();
+    if (dawWasPlaying && !daw) // the DAW stopped: the pass is over
+    {
+        if (recordArmed) setRecordArmed(false);
+        else if (dawGesture) project.endGesture();
+        dawGesture = false;
+        if (dawRecorded > 0)
+            setStatus(juce::String(dawRecorded) + " note(s) recorded from the DAW into MAIN. The same notes in the DAW's piano roll will not sound twice.");
+        else if (const int n = captureCount(); n > 0)
+            setStatus(juce::String(n) + " note(s) played with the DAW are not in MAIN - CAPTURE writes them there");
+        dawRecorded = 0;
+        for (auto& t : take) t.open = false;
+    }
+    if (daw != dawWasPlaying) { dawWasPlaying = daw; listeners.call([](Listener& l) { l.statusChanged(); }); }
 
     const auto& st = project.state();
     const double hb = engine.hostBpm.load();
@@ -419,14 +437,58 @@ double HPSamplerProcessor::padSoundSeconds(int pad) const { return soundSeconds[
 
 void HPSamplerProcessor::togglePlay()
 {
-    if (engine.transportPlaying.load() && !engine.hostDriven.load()) stop();
-    else engine.setInternalPlaying(true, true);
+    if (engine.hostDriven.load()) { setStatus("The DAW is playing and leads MAIN - start / stop it in the DAW"); return; }
+    if (engine.transportPlaying.load()) stop();
+    else playMain();
+}
+
+void HPSamplerProcessor::playMain(int64_t fromTick)
+{
+    if (engine.hostDriven.load()) { setStatus("The DAW is playing and leads MAIN - start / stop it in the DAW"); return; }
+    engine.playFrom(fromTick);
 }
 
 void HPSamplerProcessor::stop()
 {
-    engine.setInternalPlaying(false);
+    engine.stopAll();
     if (recordArmed) setRecordArmed(false);
+}
+
+bool HPSamplerProcessor::stopEverything()
+{
+    const bool main = engine.transportPlaying.load() && !engine.hostDriven.load();
+    const bool any = main || engine.previewFrame.load() >= 0.0 || engine.liveVoices.load() > 0;
+    if (any)
+    {
+        engine.stopAll();
+        if (main && recordArmed) setRecordArmed(false);
+    }
+    return any;
+}
+
+HPSamplerProcessor::NowPlaying HPSamplerProcessor::nowPlaying() const
+{
+    NowPlaying n;
+    using Who = NowPlaying::Who;
+    const bool daw = engine.hostDriven.load(), main = engine.transportPlaying.load() && !daw;
+    const bool src = engine.previewFrame.load() >= 0.0, pad = engine.liveVoices.load() > 0;
+    const double t = engine.playheadTick.load();
+    const juce::String pos = juce::String((int) (t / kTicksPerBar) + 1) + "." + juce::String((int) std::fmod(t / kPPQ, 4.0) + 1);
+    const juce::String hand = src ? "SRC " + juce::String(engine.previewSlot.load() + 1)
+                            : pad && engine.livePad.load() >= 0 ? padLabel(engine.livePad.load()) : juce::String();
+    if (daw)
+    {
+        n.who = Who::Daw;
+        n.title = (engine.hostRecording.load() ? "DAW REC " : "DAW ") + pos;
+        const auto hp = project.state().settings.hostPlays;
+        n.detail = hand.isNotEmpty() ? "+ " + hand : hp == HostPlays::Main ? "MAIN only" : hp == HostPlays::DawNotes ? "DAW notes only" : "MAIN + DAW notes";
+    }
+    else if (main && engine.countInBeat.load() > 0) { n.who = Who::Main; n.title = "COUNT " + juce::String(engine.countInBeat.load()); n.detail = "recording starts after 4"; }
+    else if (main) { n.who = Who::Main; n.title = "MAIN " + pos; n.detail = hand.isNotEmpty() ? "+ " + hand : juce::String("plug-in only"); }
+    else if (src) { n.who = Who::Source; n.title = hand; n.detail = "source audition"; }
+    else if (pad) { n.who = Who::Pad; n.title = "PAD " + hand; n.detail = "plug-in only"; }
+    else { n.title = "STOP"; n.detail = "Space = play"; }
+    return n;
 }
 
 void HPSamplerProcessor::setRecordArmed(bool armed)
@@ -438,7 +500,12 @@ void HPSamplerProcessor::setRecordArmed(bool armed)
     {
         project.beginGesture("Record pass");
         pendingRec.clear();
-        if (!engine.transportPlaying.load()) engine.setInternalPlaying(true, true);
+        dawGesture = false;
+        if (!engine.transportPlaying.load())
+        {
+            if (project.state().settings.countIn) engine.playWithCountIn();
+            else engine.playFrom(0);
+        }
         setStatus("REC: play pads / MIDI - hits are written to the 4 source lanes (overdub)");
     }
     else
@@ -450,37 +517,78 @@ void HPSamplerProcessor::setRecordArmed(bool armed)
     }
 }
 
+PatternEvent HPSamplerProcessor::eventFromHit(int pad, int64_t rawTick, float velocity) const
+{
+    const auto& st = project.state();
+    const int64_t loop = (int64_t) st.settings.patternBars * kTicksPerBar;
+    PatternEvent e;
+    e.id = newId();
+    e.pad = pad;
+    e.rawTick = rawTick;
+    e.tick = rawTick;
+    const int g = gridTicks(st.settings.recGrid);
+    if (g > 0 && st.settings.recQuantize > 0.0f)
+    {
+        const double q = std::round((double) rawTick / g) * g;
+        const int64_t t = (int64_t) std::llround(rawTick + (q - rawTick) * st.settings.recQuantize);
+        e.tick = ((t % loop) + loop) % loop;
+    }
+    e.velocity = velocity;
+    e.length = effectivePlayMode(st.pads[(size_t) pad], st.settings) == PlayMode::Gate ? kPPQ / 8 : kPPQ / 4;
+    return e;
+}
+
+bool HPSamplerProcessor::hasSameHit(int pad, int64_t tick) const
+{
+    const auto& st = project.state();
+    const int64_t loop = (int64_t) st.settings.patternBars * kTicksPerBar;
+    for (const auto& e : st.events)
+    {
+        if (e.pad != pad) continue;
+        for (const int64_t t : { e.tick, e.rawTick })
+        {
+            if (t < 0) continue;
+            const int64_t d = std::abs(t - tick);
+            if (std::min(d, loop - d) <= kSameHitTicks) return true;
+        }
+    }
+    return false;
+}
+
 void HPSamplerProcessor::handleRecordedHits()
 {
     RecordedHit h;
-    const auto& st = project.state();
-    const int64_t loop = (int64_t) st.settings.patternBars * kTicksPerBar;
-    auto quantize = [&](int64_t raw)
-    {
-        const int g = gridTicks(st.settings.recGrid);
-        if (g <= 0 || st.settings.recQuantize <= 0.0f) return raw;
-        const double q = std::round((double) raw / g) * g;
-        int64_t t = (int64_t) std::llround(raw + (q - raw) * st.settings.recQuantize);
-        return ((t % loop) + loop) % loop;
-    };
+    const int64_t loop = (int64_t) project.state().settings.patternBars * kTicksPerBar;
     while (engine.popRecordedHit(h))
     {
-        if (!recordArmed) continue;
+        // a pass longer than the pattern started under another length
+        h.tick %= loop;
+        const bool midi = (h.token & Engine::kMidiToken) != 0;
         if (h.type == RecordedHit::On)
         {
-            PatternEvent e;
-            e.id = newId();
-            e.pad = h.pad;
-            e.rawTick = h.tick;
-            e.tick = quantize(h.tick);
-            e.velocity = h.velocity;
-            const auto& p = st.pads[(size_t) h.pad];
-            e.length = effectivePlayMode(p, st.settings) == PlayMode::Gate ? kPPQ / 8 : kPPQ / 4;
+            if (h.pass != takePass) { take.clear(); takePass = h.pass; } // a new pass replaces the old take
+            bool known = false;
+            for (const auto& t : take)
+            {
+                const int64_t d = std::abs(t.tick - h.tick);
+                known = known || (t.pad == h.pad && std::min(d, loop - d) <= kSameHitTicks);
+            }
+            if (!known && take.size() < 4096) take.push_back({ h.pad, h.tick, 0, h.velocity, h.token, true });
+
+            const bool armed = recordArmed && h.rec;
+            const bool fromDaw = h.rec && !recordArmed && h.host;
+            if (!armed && !fromDaw) continue;
+            if (h.host && midi && hasSameHit(h.pad, h.tick)) continue; // the DAW repeats a note MAIN already has
+            if (fromDaw && !dawGesture) { project.beginGesture("Record from DAW"); dawGesture = true; pendingRec.clear(); }
+            const auto e = eventFromHit(h.pad, h.tick, h.velocity);
             project.edit("Record", [&](ProjectState& s) { s.events.push_back(e); });
             pendingRec.push_back({ h.token, h.pad, e.id, h.tick });
+            if (fromDaw) ++dawRecorded;
         }
         else
         {
+            for (auto& t : take)
+                if (t.open && t.token == h.token && t.pad == h.pad) { t.length = ((h.tick - t.tick) % loop + loop) % loop; t.open = false; }
             for (auto it = pendingRec.begin(); it != pendingRec.end(); ++it)
             {
                 if (it->token != h.token || it->pad != h.pad) continue;
@@ -497,6 +605,36 @@ void HPSamplerProcessor::handleRecordedHits()
             }
         }
     }
+}
+
+int HPSamplerProcessor::captureCount() const
+{
+    const int64_t loop = (int64_t) project.state().settings.patternBars * kTicksPerBar;
+    int n = 0;
+    for (const auto& t : take)
+        if (project.state().pads[(size_t) t.pad].assigned && !hasSameHit(t.pad, t.tick % loop)) ++n;
+    return n;
+}
+
+void HPSamplerProcessor::captureTake()
+{
+    handleRecordedHits();
+    const int64_t loop = (int64_t) project.state().settings.patternBars * kTicksPerBar;
+    std::vector<PatternEvent> add;
+    for (const auto& t : take)
+    {
+        if (!project.state().pads[(size_t) t.pad].assigned || hasSameHit(t.pad, t.tick % loop)) continue;
+        auto e = eventFromHit(t.pad, t.tick % loop, t.velocity);
+        if (t.length > 0 && effectivePlayMode(project.state().pads[(size_t) t.pad], project.state().settings) == PlayMode::Gate)
+            e.length = juce::jmax<int64_t>(30, t.length);
+        add.push_back(e);
+    }
+    if (add.empty()) { setStatus("Nothing to capture: play pads while the DAW (or MAIN) runs, then press CAPTURE"); return; }
+    project.edit("Capture", [&](ProjectState& s) { s.events.insert(s.events.end(), add.begin(), add.end()); });
+    ui.selectedEvents.clear();
+    for (const auto& e : add) ui.selectedEvents.push_back(e.id);
+    setStatus(juce::String((int) add.size()) + " note(s) captured into MAIN (REC Q applied, Undo removes them)");
+    listeners.call([](Listener& l) { l.projectChanged(); });
 }
 
 void HPSamplerProcessor::requantizeRecorded()

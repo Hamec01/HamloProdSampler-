@@ -10,7 +10,7 @@ class DisplayChip : public juce::Component, public juce::SettableTooltipClient
 {
 public:
     juce::String caption, value, sub;
-    juce::Colour subColour = theme::textDim;
+    juce::Colour subColour = theme::textDim, valueColour = theme::accent;
     std::function<void()> onClick;
     std::function<void(float delta, bool fine)> onWheel;
     void paint(juce::Graphics&) override;
@@ -35,15 +35,18 @@ public:
 
 private:
     void timerCallback() override;
+    void nowMenu();
     void bpmMenu();
     void keyMenu();
     void gridMenu();
     void syncMenu();
 
     HPSamplerProcessor& proc;
-    DisplayChip bpm, key, grid, sync;
+    DisplayChip now, bpm, key, grid, sync;
     juce::TextButton playBtn { "PLAY" }, stopBtn { "STOP" }, recBtn { "REC" }, metroBtn { "METRO" };
-    juce::Label posLabel;
+    juce::TextButton captureBtn { "CAPTURE" }, countBtn { "1-2-3-4" };
+    int captureTick = 0;
+    double lastHost = -1;
     juce::Label cutLabel, modeLabel, qLabel, swingLabel;
     juce::TextButton cutOff { "OFF" }, cutSrc { "PER SRC" }, cutAll { "ALL" };
     juce::TextButton gateDef { "GATE" }, oneDef { "1-SHOT" };

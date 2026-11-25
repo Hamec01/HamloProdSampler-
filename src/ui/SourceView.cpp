@@ -858,9 +858,9 @@ SourceView::SourceView(HPSamplerProcessor& p) : proc(p)
     {
         const int pad = editingPad();
         if (pad < 0) return;
-        proc.triggerPad(pad, 0.9f, 6);
+        proc.triggerPad(pad, 0.9f, Engine::kAuditionPointer | 6);
         juce::Component::SafePointer<SourceView> safe(this);
-        juce::Timer::callAfterDelay(500, [safe, pad] { if (safe) safe->proc.releasePad(pad, 6); });
+        juce::Timer::callAfterDelay(500, [safe, pad] { if (safe) safe->proc.releasePad(pad, Engine::kAuditionPointer | 6); });
     };
     startTimerHz(30);
 }
@@ -1338,17 +1338,18 @@ void SourceView::filesDropped(const juce::StringArray& files, int, int)
     if (!files.isEmpty()) proc.loadSource(slot, juce::File(files[0]));
 }
 
+void SourceView::playFromKeyboard()
+{
+    const auto& v = view();
+    if (v.selStart >= 0 && v.selEnd > v.selStart) auditionSelection();
+    else if (data()) auditionFrom((int64_t) v.viewStart);
+}
+
 bool SourceView::keyPressed(const juce::KeyPress& k)
 {
     auto& v = view();
     const auto d = data();
-    if (k == juce::KeyPress::spaceKey)
-    {
-        if (proc.engine.previewFrame.load() >= 0 && proc.engine.previewSlot.load() == slot) stopAudition();
-        else if (v.selStart >= 0 && v.selEnd > v.selStart) auditionSelection();
-        else if (d) auditionFrom((int64_t) v.viewStart);
-        return true;
-    }
+    // Space goes to the editor (one play / stop switch for the whole plug-in)
     if (k == juce::KeyPress::returnKey) { quickAssign(); return true; }
     if (k == juce::KeyPress::escapeKey) { stopAudition(); proc.ui.padMode = UiState::PadMode::Perform; endPadEdit(); return true; }
     if (k.getTextCharacter() == 'z' || k.getTextCharacter() == 'Z') { zoomToSelection(); return true; }

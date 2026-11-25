@@ -300,6 +300,16 @@ void HPSamplerEditor::showBridgeMenu()
     });
 }
 
+// Space is one switch for the whole plug-in: anything the plug-in itself sounds stops, otherwise the visible view plays.
+bool HPSamplerEditor::handleSpace()
+{
+    if (proc.stopEverything()) return true;
+    if (proc.ui.view >= 0) { sourceView.playFromKeyboard(); return true; }
+    if (proc.engine.hostDriven.load()) { proc.setStatus("The DAW is playing and leads MAIN - stop it in the DAW"); return false; } // the DAW gets the key
+    proc.playMain();
+    return true;
+}
+
 bool HPSamplerEditor::keyPressed(const juce::KeyPress& k)
 {
     if (k.getModifiers().isCtrlDown() && (k.getKeyCode() == 'Z' || k.getKeyCode() == 'z'))
@@ -308,7 +318,10 @@ bool HPSamplerEditor::keyPressed(const juce::KeyPress& k)
         return true;
     }
     if (k.getModifiers().isCtrlDown() && (k.getKeyCode() == 'Y' || k.getKeyCode() == 'y')) { proc.project.redo(); return true; }
-    if (k == juce::KeyPress::spaceKey && proc.ui.view < 0) { proc.togglePlay(); return true; }
+    if (k == juce::KeyPress::spaceKey) return handleSpace();
+    // a click on a pad moves the keyboard focus away from the view: its keys still work
+    if (proc.ui.view >= 0) { if (!sourceView.hasKeyboardFocus(true) && sourceView.keyPressed(k)) return true; }
+    else if (!patternView.hasKeyboardFocus(true) && patternView.keyPressed(k)) return true;
     if (k == juce::KeyPress::escapeKey) { proc.ui.padMode = UiState::PadMode::Perform; padGrid.refresh(); return true; }
     return false;
 }

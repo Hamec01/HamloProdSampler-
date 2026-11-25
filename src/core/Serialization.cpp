@@ -137,6 +137,7 @@ juce::String Serialization::toJson(const ProjectState& s)
         o->setProperty("rawTick", (juce::int64) e.rawTick);
         o->setProperty("length", (juce::int64) e.length);
         o->setProperty("velocity", e.velocity);
+        if (e.muted) o->setProperty("muted", true);
         events.add(juce::var(o));
     }
     root->setProperty("events", events);
@@ -159,6 +160,9 @@ juce::String Serialization::toJson(const ProjectState& s)
     so->setProperty("recGrid", (int) st.recGrid);
     so->setProperty("metronome", st.metronome);
     so->setProperty("masterDb", st.masterDb);
+    so->setProperty("countIn", st.countIn);
+    so->setProperty("hostPlays", (int) st.hostPlays);
+    so->setProperty("hostCapture", (int) st.hostCapture);
     root->setProperty("settings", juce::var(so));
 
     return juce::JSON::toString(juce::var(root), false);
@@ -224,6 +228,7 @@ bool Serialization::fromJson(const juce::String& json, ProjectState& out, juce::
             e.rawTick = get(o, "rawTick", (int64_t) -1);
             e.length = juce::jmax<int64_t>(1, get(o, "length", (int64_t) (kPPQ / 4)));
             e.velocity = juce::jlimit(0.0f, 1.0f, get(o, "velocity", 0.9f));
+            e.muted = get(o, "muted", false);
             if (e.id.isEmpty()) e.id = newId();
             s.events.push_back(e);
         }
@@ -245,6 +250,9 @@ bool Serialization::fromJson(const juce::String& json, ProjectState& out, juce::
     st.recGrid = (GridDiv) juce::jlimit(0, (int) GridDiv::Off, get(so, "recGrid", (int) st.recGrid));
     st.metronome = get(so, "metronome", st.metronome);
     st.masterDb = juce::jlimit(-60.0f, 12.0f, get(so, "masterDb", st.masterDb));
+    st.countIn = get(so, "countIn", st.countIn);
+    st.hostPlays = (HostPlays) juce::jlimit(0, 2, get(so, "hostPlays", (int) st.hostPlays));
+    st.hostCapture = (HostCapture) juce::jlimit(0, 2, get(so, "hostCapture", (int) st.hostCapture));
     out = s;
     return true;
 }
@@ -257,7 +265,7 @@ juce::MidiFile Serialization::patternToMidi(const ProjectState& s)
     for (const auto& e : s.events)
     {
         const int note = kBaseMidiNote + e.pad;
-        if (note > 127) continue;
+        if (note > 127 || e.muted) continue;
         const auto& p = s.pads[(size_t) e.pad];
         const bool gate = p.assigned && effectivePlayMode(p, s.settings) == PlayMode::Gate;
         const int64_t len = gate ? e.length : std::min<int64_t>(e.length, kPPQ / 8); // OneShot: trigger only

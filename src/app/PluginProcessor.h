@@ -36,7 +36,15 @@ struct UiState
     bool autoAudition = true;
     bool loopAudition = false;
     std::vector<juce::String> selectedEvents;
-    bool drawTool = true;
+    // MAIN editing (FL Piano-roll tools) and view
+    enum class Tool { Draw, Paint, StepPaint, Delete, Mute, Slice, Select, Zoom, Play };
+    Tool tool = Tool::Draw;
+    bool padRows = false;               // false = 4 source lanes, true = one row per pad
+    bool showVelocity = true;
+    bool followPlayhead = true;
+    double mainStart = 0.0, mainTicks = 0.0; // visible time (0 ticks = the whole pattern)
+    double mainVZoom = 1.0;
+    int mainScrollY = 0;
     bool showGuide = true;
 };
 
@@ -95,6 +103,14 @@ public:
     // transport / recording
     void togglePlay();
     void stop();
+    // Space: whatever the plug-in itself sounds (audition, hand-played pads, MAIN) stops; returns false when nothing did
+    bool stopEverything();
+    void playMain(int64_t fromTick = 0);
+    // DAW -> MAIN: notes of the last take (played while a transport ran) that MAIN does not have yet
+    int  captureCount() const;
+    void captureTake();
+    struct NowPlaying { enum class Who { Nothing, Pad, Source, Main, Daw } who = Who::Nothing; juce::String title, detail; };
+    NowPlaying nowPlaying() const;
     void setRecordArmed(bool armed);
     bool isRecordArmed() const { return recordArmed; }
     void requantizeRecorded();
@@ -148,6 +164,13 @@ private:
     double engineRate = 44100.0;
     bool recordArmed = false;
     struct PendingRec { uint32_t token; int pad; juce::String eventId; int64_t onTick; };
+    bool hasSameHit(int pad, int64_t tick) const;
+    PatternEvent eventFromHit(int pad, int64_t rawTick, float velocity) const;
+    struct TakeNote { int pad; int64_t tick, length; float velocity; uint32_t token; bool open; };
+    std::vector<TakeNote> take;
+    uint32_t takePass = 0;
+    bool dawWasPlaying = false, dawGesture = false;
+    int dawRecorded = 0;
     std::vector<PendingRec> pendingRec;
     Pad clipboard;
     bool hasClipboard = false;

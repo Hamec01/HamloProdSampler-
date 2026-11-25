@@ -126,6 +126,12 @@ target_link_libraries(HPSAMPLER_Shot PRIVATE HPSAMPLER HPSAMPLER_Core juce::juce
 target_compile_definitions(HPSAMPLER_Shot PRIVATE JUCE_STANDALONE_APPLICATION=1)
 target_include_directories(HPSAMPLER_Shot PRIVATE src)
 
+# Drives the processor + editor (DAW transport, keys, MAIN tools) and checks the result (not shipped)
+add_executable(HPSAMPLER_AppCheck tools/AppCheck.cpp)
+target_link_libraries(HPSAMPLER_AppCheck PRIVATE HPSAMPLER HPSAMPLER_Core juce::juce_audio_utils)
+target_compile_definitions(HPSAMPLER_AppCheck PRIVATE JUCE_STANDALONE_APPLICATION=1 JUCE_MODAL_LOOPS_PERMITTED=1)
+target_include_directories(HPSAMPLER_AppCheck PRIVATE src)
+
 # Loads the built VST3 like a host (diagnostics, not shipped)
 add_executable(HPSAMPLER_HostCheck tools/HostCheck.cpp)
 target_link_libraries(HPSAMPLER_HostCheck PRIVATE juce::juce_audio_processors juce::juce_audio_utils)

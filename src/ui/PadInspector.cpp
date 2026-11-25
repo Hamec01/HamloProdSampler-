@@ -78,9 +78,9 @@ PadInspector::PadInspector(HPSamplerProcessor& p) : proc(p)
     playBtn.onClick = [this]
     {
         const int pad = proc.ui.selectedPad;
-        proc.triggerPad(pad, 0.9f, 7);
+        proc.triggerPad(pad, 0.9f, Engine::kAuditionPointer | 7);
         juce::Component::SafePointer<PadInspector> safe(this);
-        juce::Timer::callAfterDelay(400, [safe, pad] { if (safe) safe->proc.releasePad(pad, 7); });
+        juce::Timer::callAfterDelay(400, [safe, pad] { if (safe) safe->proc.releasePad(pad, Engine::kAuditionPointer | 7); });
     };
     // PITCH & TIME (speed first: the most used control)
     addSlider("PITCH & TIME", "Speed", 0.25, 4.0, 0.01, " x", [](const PadSettings& s) { return s.speed; }, [](PadSettings& s, float v) { s.speed = v; }, 1.0);

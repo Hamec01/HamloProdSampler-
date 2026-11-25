@@ -88,6 +88,20 @@ void Engine::setInternalPlaying(bool shouldPlay, bool fromStart)
     pushCmd(c);
 }
 
+void Engine::playFrom(int64_t loopTick)
+{
+    Cmd c; c.type = Cmd::Play; c.flag = true; c.a = std::max<int64_t>(0, loopTick);
+    pushCmd(c);
+}
+
+void Engine::playWithCountIn()
+{
+    Cmd c; c.type = Cmd::Play; c.flag = true; c.a = -(int64_t) kTicksPerBar;
+    pushCmd(c);
+}
+
+void Engine::stopAll() { Cmd c; c.type = Cmd::StopAll; pushCmd(c); }
+
 void Engine::panic() { Cmd c; c.type = Cmd::Panic; pushCmd(c); }
 
 bool Engine::popRecordedHit(RecordedHit& out)
@@ -316,6 +330,23 @@ void Engine::renderClick(float* L, float* R, int n)
     }
 }
 
+void Engine::pushHit(RecordedHit::Type type, const Ev& e, bool rec)
+{
+    const double absTick = blockStartTick + e.offset * ticksPerSample;
+    if (absTick < -(double) (kPPQ / 4)) return;      // count-in: free playing
+    const int64_t tick = absTick < 0.0 ? 0 : currentLoopTick(e.offset); // a hit just before the "one" belongs to it
+    RecordedHit h { type, e.pad, tick, e.vel, e.token, rec, hostDriving, pass };
+    if (rec && type == RecordedHit::On)
+    {
+        recents[(size_t) recentPos] = { e.pad, h.tick, absTick };
+        recentPos = (recentPos + 1) % (int) recents.size();
+    }
+    int s1, n1, s2, n2;
+    recFifo.prepareToWrite(1, s1, n1, s2, n2);
+    if (n1 > 0) recBuf[(size_t) s1] = h; else if (n2 > 0) recBuf[(size_t) s2] = h;
+    recFifo.finishedWrite(n1 + n2);
+}
+
 int64_t Engine::currentLoopTick(int offset) const noexcept
 {
     const double t = blockStartTick + offset * ticksPerSample;
@@ -339,6 +370,14 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         if (nev < (int) evs.size()) evs[(size_t) nev++] = { juce::jlimit(0, n - 1, off), kind, pad, vel, token };
     };
 
+    // One thing at a time (as in a hardware sampler): a hand-played pad ends the audition, an audition ends hand-played
+    // pads and MAIN, MAIN ends both. The DAW is above all of them: when it starts it takes the transport over, and
+    // nothing in the plug-in can start MAIN next to it.
+    hostDriving = host.valid && host.playing;
+    auto fadeTokens = [&](uint32_t mask) { for (auto& v : voices) if (v.active && (v.token & mask) != 0) fadeVoice(v, 0.008f); };
+    const uint32_t handTokens = kGuiToken | (hostDriving ? 0u : kMidiToken);
+    auto dropPendingOns = [&] { for (int i = 0; i < nev; ++i) if (evs[(size_t) i].kind == 1) evs[(size_t) i].kind = 0; };
+
     // ---- commands from the GUI ----
     {
         int s1, n1, s2, n2;
@@ -347,20 +386,43 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         {
             switch (c.type)
             {
-                case Cmd::PadOn:  addEv(0, 1, c.pad, c.vel, c.token); break;
+                case Cmd::PadOn:
+                    if (c.pad >= 0 && c.pad < kNumPads && s.pads[(size_t) c.pad].assigned) stopPreviewNow();
+                    addEv(0, 1, c.pad, c.vel, c.token); break;
                 case Cmd::PadOff: addEv(0, 0, c.pad, 0.0f, c.token); break;
                 case Cmd::Preview:
                     previewActive = true; previewStopping = false; previewSrc = juce::jlimit(0, kNumSources - 1, c.slot);
                     previewStart = (double) c.a; previewEnd = (double) std::max(c.a + 2, c.b); previewPos = previewStart;
                     previewLoop = c.flag; previewGain = 0.0f; previewSlot.store(previewSrc);
+                    previewFrame.store(previewStart);
+                    if (internalPlaying && !hostDriving) { internalPlaying = false; fadeTokens(kSeqToken); }
+                    fadeTokens(handTokens);
+                    dropPendingOns(); // a pad and an audition in the same block: the later command wins
                     break;
-                case Cmd::PreviewStop: if (previewActive) previewStopping = true; break;
-                case Cmd::Play: internalPlaying = true; if (c.flag) internalTick = 0.0; break;
-                case Cmd::Stop: internalPlaying = false; internalTick = 0.0; break;
+                case Cmd::PreviewStop: stopPreviewNow(); break;
+                case Cmd::Play:
+                    if (hostDriving) break; // the DAW leads
+                    fadeTokens(kSeqToken | handTokens);
+                    for (auto& o : offs) o.active = false;
+                    stopPreviewNow();
+                    internalPlaying = true;
+                    if (c.flag) internalTick = (double) c.a;
+                    lastEndTick = internalTick;
+                    break;
+                case Cmd::Stop:
+                    internalPlaying = false; internalTick = 0.0;
+                    if (!hostDriving) fadeTokens(kSeqToken);
+                    break;
+                case Cmd::StopAll:
+                    internalPlaying = false; internalTick = 0.0;
+                    stopPreviewNow();
+                    fadeTokens(handTokens | (hostDriving ? 0u : kSeqToken));
+                    dropPendingOns();
+                    break;
                 case Cmd::Panic:
                     for (auto& v : voices) fadeVoice(v, 0.004f);
                     for (auto& o : offs) o.active = false;
-                    if (previewActive) previewStopping = true;
+                    stopPreviewNow();
                     break;
             }
         };
@@ -377,6 +439,9 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         if (m.isNoteOn())
         {
             const int pad = m.getNoteNumber() - kBaseMidiNote;
+            if (pad < 0 || pad >= kNumPads) continue;
+            if (hostDriving) hostMidiNotes.fetch_add(1);
+            else if (s.pads[(size_t) pad].assigned) stopPreviewNow();
             addEv(off, 1, pad, m.getFloatVelocity(), kMidiToken | ((uint32_t) m.getChannel() << 8) | (uint32_t) m.getNoteNumber());
         }
         else if (m.isNoteOff()) // includes NoteOn velocity 0
@@ -394,19 +459,27 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
     bool playing = false;
     double bpm = s.bpm > 20.0 ? s.bpm : 120.0;
     double startTick = 0.0;
-    if (host.valid && host.playing)
+    if (hostDriving)
     {
+        if (!wasHostDriving) // the DAW starts: it takes over from MAIN / audition
+        {
+            if (internalPlaying) { internalPlaying = false; fadeTokens(kSeqToken); }
+            internalTick = 0.0;
+            stopPreviewNow();
+        }
         playing = true;
         bpm = host.bpm > 20.0 ? host.bpm : bpm;
         startTick = host.ppq * kPPQ;
-        hostDriven.store(true);
     }
     else if (internalPlaying)
     {
         playing = true;
         startTick = internalTick;
-        hostDriven.store(false);
     }
+    // DAW stopped: everything it played stops (an offline render keeps its tails)
+    if (!hostDriving && wasHostDriving && !host.offline) fadeTokens(kSeqToken | kMidiToken);
+    hostDriven.store(hostDriving);
+    hostRecording.store(hostDriving && host.recording);
     hostBpm.store(host.valid ? host.bpm : 0.0);
     ticksPerSample = bpm / 60.0 * kPPQ / sr;
     loopTicks = std::max<int64_t>(kPPQ, s.loopTicks);
@@ -421,7 +494,29 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         for (auto& o : offs) o.active = false;
     };
     const bool jumped = playing && wasPlaying && std::abs(startTick - lastEndTick) > 4.0;
-    if ((!playing && wasPlaying) || jumped) releaseSequenced();
+    if ((!playing && wasPlaying) || jumped || hostDriving != wasHostDriving) releaseSequenced();
+    if (playing && (!wasPlaying || hostDriving != wasHostDriving)) ++pass;
+    if (!playing || !wasPlaying || jumped) for (auto& x : recents) x.pad = -1;
+
+    const bool rec = playing && (recording.load()
+                     || (hostDriving && (s.hostCapture == HostCapture::Always
+                                         || (s.hostCapture == HostCapture::WhenRecording && host.recording))));
+    const bool patternAudible = playing && !(hostDriving && s.hostPlays == HostPlays::DawNotes);
+    // the DAW sends a note that MAIN plays anyway (recorded in both): one sound, MAIN's
+    auto playedByMain = [&](int pad, int64_t tick)
+    {
+        for (const auto& e : s.events)
+        {
+            if (e.pad != pad) continue;
+            for (const int64_t t : { e.tick, e.rawTick })
+            {
+                if (t < 0) continue;
+                const int64_t d = std::abs(t - tick);
+                if (std::min(d, loopTicks - d) <= kSameHitTicks) return true;
+            }
+        }
+        return false;
+    };
 
     if (playing)
     {
@@ -435,8 +530,9 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         // pattern events (loop of loopTicks)
         const double L = (double) loopTicks;
         const int64_t k0 = (int64_t) std::floor(startTick / L), k1 = (int64_t) std::floor((endTick - 1e-9) / L);
-        for (int64_t k = k0; k <= k1; ++k)
+        for (int64_t k = k0; patternAudible && k <= k1; ++k)
         {
+            if (k < 0) continue; // count-in
             const double base = (double) k * L;
             for (size_t ei = 0; ei < s.events.size(); ++ei)
             {
@@ -445,6 +541,13 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
                 const int64_t inSixteenth = e.tick % (kPPQ / 2);
                 if (s.swing > 0.0f && std::abs(inSixteenth - kPPQ / 4) <= 8) t += s.swing * (kPPQ / 6.0); // off-beat 1/16 swing
                 if (t < startTick || t >= endTick) continue;
+                if (e.rawTick >= 0) // just recorded and quantized forward: it was already heard
+                {
+                    bool heard = false;
+                    for (const auto& x : recents)
+                        heard = heard || (x.pad == e.pad && x.loopTick == e.rawTick && std::abs(t - x.absTick) < L * 0.5);
+                    if (heard) continue;
+                }
                 const int off = (int) ((t - startTick) / ticksPerSample);
                 const uint32_t token = kSeqToken | (uint32_t) (ei & 0xffff);
                 addEv(off, 1, e.pad, e.velocity, token);
@@ -458,11 +561,12 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
             }
         }
         // metronome clicks on beats
-        if (s.metronome)
+        const bool counting = !hostDriving && startTick < 0.0;
+        if (s.metronome || counting)
         {
             const int64_t b0 = (int64_t) std::ceil(startTick / kPPQ), b1 = (int64_t) std::floor((endTick - 1e-9) / kPPQ);
             for (int64_t b = b0; b <= b1; ++b)
-                addEv((int) (((double) b * kPPQ - startTick) / ticksPerSample), 2, (b % 4) == 0 ? 1 : 0, 0.0f, 0);
+                if (s.metronome || b < 0) addEv((int) (((double) b * kPPQ - startTick) / ticksPerSample), 2, (b % 4) == 0 ? 1 : 0, 0.0f, 0);
         }
     }
 
@@ -477,7 +581,6 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
     float* RR = R != nullptr ? R : L; // mono bus: both channels summed into L
 
     int pos = 0;
-    const bool rec = recording.load() && playing;
     for (int i = 0; i <= nev; ++i)
     {
         const int until = i < nev ? evs[(size_t) i].offset : n;
@@ -490,29 +593,21 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         if (i == nev) break;
         const auto& e = evs[(size_t) i];
         const bool live = (e.token & kSeqToken) == 0;
+        const bool audition = (e.token & kGuiToken) != 0 && (e.token & (uint32_t) kAuditionPointer) != 0;
+        const bool report = playing && live && !audition && e.pad >= 0 && e.pad < kNumPads && s.pads[(size_t) e.pad].assigned;
         if (e.kind == 1)
         {
-            noteOn(s, e.pad, e.vel, e.token, live);
-            if (rec && live && e.pad >= 0 && e.pad < kNumPads && s.pads[(size_t) e.pad].assigned)
-            {
-                int s1, n1, s2, n2;
-                recFifo.prepareToWrite(1, s1, n1, s2, n2);
-                const RecordedHit h { RecordedHit::On, e.pad, currentLoopTick(e.offset), e.vel, e.token };
-                if (n1 > 0) recBuf[(size_t) s1] = h; else if (n2 > 0) recBuf[(size_t) s2] = h;
-                recFifo.finishedWrite(n1 + n2);
-            }
+            const bool fromDaw = hostDriving && (e.token & kMidiToken) != 0;
+            const bool muted = fromDaw && ((s.hostPlays == HostPlays::Main && !rec)
+                                           || (s.hostPlays != HostPlays::DawNotes && playedByMain(e.pad, currentLoopTick(e.offset))));
+            if (!muted) noteOn(s, e.pad, e.vel, e.token, live);
+            if (live && !fromDaw && e.pad >= 0) livePad.store(e.pad);
+            if (report) pushHit(RecordedHit::On, e, rec);
         }
         else if (e.kind == 0)
         {
             noteOff(s, e.pad, e.token);
-            if (rec && live && e.pad >= 0 && e.pad < kNumPads)
-            {
-                int s1, n1, s2, n2;
-                recFifo.prepareToWrite(1, s1, n1, s2, n2);
-                const RecordedHit h { RecordedHit::Off, e.pad, currentLoopTick(e.offset), 0.0f, e.token };
-                if (n1 > 0) recBuf[(size_t) s1] = h; else if (n2 > 0) recBuf[(size_t) s2] = h;
-                recFifo.finishedWrite(n1 + n2);
-            }
+            if (report) pushHit(RecordedHit::Off, e, rec);
         }
         else
         {
@@ -544,9 +639,16 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         if (!(host.valid && host.playing)) internalTick = endTick;
         double m = std::fmod(endTick, (double) loopTicks);
         if (m < 0) m += (double) loopTicks;
-        playheadTick.store(m);
+        playheadTick.store(!hostDriving && endTick < 0.0 ? 0.0 : m);
     }
+    countInBeat.store(playing && !hostDriving && endTick < 0.0
+                          ? juce::jlimit(1, 4, (int) std::floor((endTick + kTicksPerBar) / kPPQ) + 1) : 0);
+    int hand = 0;
+    for (const auto& v : voices)
+        if (v.active && v.stage != Stage::Fade && v.stage != Stage::Release && (v.token & handTokens) != 0) ++hand;
+    liveVoices.store(hand);
     transportPlaying.store(playing);
+    wasHostDriving = hostDriving;
     wasPlaying = playing;
     lastEndTick = endTick;
 }
