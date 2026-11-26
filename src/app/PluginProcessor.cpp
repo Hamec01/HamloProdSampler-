@@ -889,7 +889,6 @@ bool HPSamplerProcessor::exportWav(const juce::File& f, juce::String& error, dou
     juce::AudioBuffer<float> out;
     auto snap = buildSnapshot();
     snap->metronome = false; // never in a file
-    Engine::renderOffline(*snap, sounds, engineRate, out, tailSeconds);
     if (onlySource >= 0) // one MAIN lane: the notes of that source's pads (its mix stays: volume, pan, filters)
     {
         const auto& st = project.state();
@@ -900,6 +899,7 @@ bool HPSamplerProcessor::exportWav(const juce::File& f, juce::String& error, dou
         }), ev.end());
         if (ev.empty()) { error = "SRC " + juce::String(onlySource + 1) + " has no notes in MAIN"; return false; }
     }
+    Engine::renderOffline(*snap, sounds, engineRate, out, tailSeconds);
     f.deleteFile();
     std::unique_ptr<juce::FileOutputStream> stream(f.createOutputStream());
     if (stream == nullptr) { error = "Cannot write " + f.getFullPathName(); return false; }
