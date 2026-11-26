@@ -149,6 +149,10 @@ struct SourceAnalysis
     int featureHop = 256;
     std::vector<float> onsetCurve;          // 0..1 spectral flux
     std::vector<float> rms;                 // 0..1
+    std::vector<float> absoluteRms;         // cached level, before display normalisation
+    std::vector<std::array<float, 3>> bandRms; // 20-150, 150-2000, 2000-16000 Hz
+    struct Bass { double start = 0, end = 0; int midi = -1; float confidence = 0; };
+    std::vector<Bass> bass; // measured window only; later regions remain unknown
     std::vector<std::array<float, 12>> chroma;
     std::vector<int64_t> onsets;            // frames, peak-picked
     std::vector<float>   onsetStrength;

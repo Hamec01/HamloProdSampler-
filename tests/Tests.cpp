@@ -666,8 +666,8 @@ void testLiveBridge()
 void testSharedBridgeFilesInSync()
 {
     // HP Bridge files are shared with HPDG (like HamloLinkProtocol): both copies must stay identical.
-    const juce::File hpdg("C:/DRUMENGINE/Source/Services/HPBridge");
     const juce::File mine = juce::File(__FILE__).getParentDirectory().getParentDirectory().getChildFile("HPBridgeCore");
+    const auto hpdg = mine.getParentDirectory().getParentDirectory().getChildFile("HPDG/Source/Services/HPBridge");
     if (!hpdg.isDirectory()) { std::cout << "  (HPDG checkout not found - shared-file check skipped)\n"; return; }
     for (auto [a, b] : { std::pair { "include/hpbridge/BridgeTypes.h", "hpbridge/BridgeTypes.h" },
                          std::pair { "include/hpbridge/BridgeValidator.h", "hpbridge/BridgeValidator.h" },
@@ -771,6 +771,73 @@ void testAnalysisAndChop()
     CHECK(ChopEngine::tapPeriod({ 0.0, 0.5 }) == 0.0, "tap tempo needs more taps");
     const auto snapped = ChopEngine::snap(*d, 26460 + 500, SnapMode::Grid, g, GridDiv::Quarter, 5000);
     CHECK(std::abs((double) snapped - 26460.0) < 2.0, "grid snap to beat");
+}
+
+void testContextFeatures()
+{
+    Project p;
+    auto source = std::make_shared<SourceData>();
+    source->id = "context-source"; source->sampleRate = 48000; source->numFrames = 96000;
+    auto audio = std::make_shared<juce::AudioBuffer<float>>(2, 96000); audio->clear(); source->audio = audio;
+    auto& a = source->analysis;
+    a.ready = true; a.featureHop = a.specHop = 4800; a.keyConfidence = 1;
+    a.absoluteRms.assign(21, 0.5f); a.onsetCurve.assign(21, 0.8f);
+    a.bandRms.assign(21, { 0.4f, 0.2f, 0.1f }); a.chroma.resize(21);
+    for (auto& row : a.chroma) row[0] = 1;
+    a.bass.push_back({ 0, 2, 36, 0.9f });
+    p.setSourceData(source);
+    p.mutate([](ProjectState& st)
+    {
+        st.sources[0].id = "context-source";
+        st.settings.patternBars = 1; st.settings.sync = SyncMode::Off;
+        auto& pad = st.pads[0]; pad.assigned = true; pad.end = 96000;
+        pad.s.pitch = 2; pad.s.fadeInMs = pad.s.fadeOutMs = 0;
+        st.events.push_back({ "note", 0, 0, -1, 240, 1, false });
+    });
+    const auto start = juce::Time::getMillisecondCounterHiRes();
+    auto c = BridgeAdapter::buildSamplerContext(p, 1, "test");
+    std::cout << "context projection 1 bar: " << juce::Time::getMillisecondCounterHiRes() - start << " ms\n";
+    CHECK(c.featureVersion == 1 && c.features.size() == 16 && !c.audioReference, "metadata context has a full grid and no audio path");
+    CHECK(c.features[4].energy > 0.8f && c.features[4].chroma[2] > 0.99f, "context follows pitch and energy");
+    CHECK(c.features[4].bassMidi == 38 && c.features[4].bassConfidence > 0.5f, "measured bass follows pad transpose");
+    hpbridge::SamplerContextSnapshot parsed;
+    CHECK(hpbridge::BridgeValidator::fromJson(hpbridge::BridgeValidator::toJson(c), parsed).ok
+        && parsed.features[4].bassMidi == 38, "numeric context round trips");
+    auto malformed = c; malformed.features[0].confidence = std::numeric_limits<float>::quiet_NaN();
+    CHECK(!hpbridge::BridgeValidator::validate(malformed).ok, "non-finite features rejected");
+    malformed = c; malformed.features.pop_back();
+    CHECK(!hpbridge::BridgeValidator::validate(malformed).ok, "incomplete grid rejected");
+    c.featureVersion = 0; c.features.clear();
+    CHECK(hpbridge::BridgeValidator::fromJson(hpbridge::BridgeValidator::toJson(c), parsed).ok
+        && parsed.featureVersion == 0, "legacy metadata accepted");
+    for (size_t i = 10; i < a.chroma.size(); ++i) { a.chroma[i] = {}; a.chroma[i][7] = 1; }
+    p.mutate([](ProjectState& st) { st.pads[0].s.reverse = true; st.pads[0].s.pitch = 0; });
+    c = BridgeAdapter::buildSamplerContext(p, 2, "test");
+    CHECK(c.features[0].chroma[7] > 0.99f && c.features[12].chroma[0] > 0.99f, "reverse maps the source feature timeline");
+    p.mutate([](ProjectState& st) { st.pads[0].s.reverse = false; st.pads[0].s.speed = 2; });
+    c = BridgeAdapter::buildSamplerContext(p, 2, "test");
+    CHECK(c.features[6].chroma[7] > 0.99f && c.features[12].energy == 0, "speed maps features and audible duration");
+    p.mutate([](ProjectState& st) { st.pads[0].s.speed = 1; });
+    p.mutate([](ProjectState& st) { st.pads[0].s.playMode = (int) PlayMode::Gate; st.pads[0].s.releaseMs = 1; });
+    c = BridgeAdapter::buildSamplerContext(p, 2, "test");
+    CHECK(c.features[8].energy == 0 && c.features[8].bassMidi == -1, "gate release removes later energy and bass");
+    p.mutate([](ProjectState& st) { st.events.clear(); });
+    c = BridgeAdapter::buildSamplerContext(p, 3, "test");
+    CHECK(std::all_of(c.features.begin(), c.features.end(), [](const auto& f) { return f.energy == 0 && f.bassMidi == -1; }),
+        "empty MAIN clears the numeric grid");
+    c.patternBars = 64; c.features.resize(1024);
+    CHECK(hpbridge::BridgeValidator::toJson(c).getNumBytesAsUTF8() < hpbridge::kSlotPayloadBytes, "64-bar feature grid fits bridge slot");
+    p.mutate([](ProjectState& st)
+    {
+        st.settings.patternBars = 16; st.settings.bpm = 90;
+        st.pads[0].s.playMode = (int) PlayMode::OneShot;
+        for (int i = 0; i < 256; ++i) st.events.push_back({ newId(), 0, i * (kPPQ / 4), -1, 240, 0.8f, false });
+    });
+    const auto busyStart = juce::Time::getMillisecondCounterHiRes();
+    c = BridgeAdapter::buildSamplerContext(p, 4, "test");
+    std::cout << "context projection 16 bars / 256 notes: " << juce::Time::getMillisecondCounterHiRes() - busyStart
+        << " ms, " << hpbridge::BridgeValidator::toJson(c).getNumBytesAsUTF8() << " bytes\n";
+    CHECK(c.features.size() == 256 && hpbridge::BridgeValidator::validate(c).ok, "busy arrangement context validates");
 }
 
 void testPersistenceAndBridge()
@@ -960,6 +1027,7 @@ int main(int argc, char** argv)
     testPadSpeed();
     testAnalysisAndChop();
     testPersistenceAndBridge();
+    testContextFeatures();
     testLiveBridge();
     testSharedBridgeFilesInSync();
     std::cout << (checks - failures) << "/" << checks << " checks passed\n";

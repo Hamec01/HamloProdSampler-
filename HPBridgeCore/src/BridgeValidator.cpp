@@ -165,6 +165,23 @@ ValidationResult BridgeValidator::validate(const SamplerContextSnapshot& s)
             return ValidationResult::failure("phrase has invalid tick range");
     }
 
+    if (s.featureVersion != 0 && s.featureVersion != 1)
+        return ValidationResult::failure("Unsupported context feature version");
+    const auto expectedSteps = (size_t) s.patternBars * s.transport.meterNumerator * 16 / s.transport.meterDenominator;
+    if ((s.featureVersion == 0 && !s.features.empty()) || s.features.size() > 1024)
+        return ValidationResult::failure("Context feature count out of range");
+    if (s.featureVersion == 1 && (s.timebase.ticksPerQuarter % 4 != 0 || s.features.size() != expectedSteps))
+        return ValidationResult::failure("Context feature grid does not match pattern");
+    for (const auto& f : s.features)
+    {
+        for (float v : { f.energy, f.onset, f.low, f.mid, f.high, f.bassConfidence, f.confidence })
+            if (!isFiniteInRange(v, 0, 1)) return ValidationResult::failure("Invalid context feature value");
+        for (float v : f.chroma)
+            if (!isFiniteInRange(v, 0, 1)) return ValidationResult::failure("Invalid context chroma");
+        if (f.bassMidi < -1 || f.bassMidi > 127 || (f.bassMidi == -1 && f.bassConfidence != 0))
+            return ValidationResult::failure("Invalid context bass note");
+    }
+
     return ValidationResult::success();
 }
 
@@ -326,8 +343,28 @@ juce::String BridgeValidator::toJson(const SamplerContextSnapshot& s)
     an->setProperty("unknownPolicy", s.unknownPolicy);
     root->setProperty("analysis", juce::var(an.release()));
     root->setProperty("audioReference", s.audioReference.has_value() ? juce::var(*s.audioReference) : juce::var());
+    if (s.featureVersion != 0)
+    {
+        auto features = std::make_unique<juce::DynamicObject>();
+        features->setProperty("version", s.featureVersion);
+        features->setProperty("method", "source_projection");
+        juce::Array<juce::var> rows;
+        for (const auto& f : s.features)
+        {
+            juce::Array<juce::var> row;
+            // Quantisation bounds both payload size and the numerical round-trip error.
+            auto add = [&](float v) { row.add(std::round((double) v * 10000.0) / 10000.0); };
+            for (float v : { f.energy, f.onset, f.low, f.mid, f.high }) add(v);
+            for (float v : f.chroma) add(v);
+            row.add(f.bassMidi);
+            add(f.bassConfidence); add(f.confidence);
+            rows.add(row);
+        }
+        features->setProperty("steps", rows);
+        root->setProperty("features", juce::var(features.release()));
+    }
 
-    return juce::JSON::toString(juce::var(root.release()), false);
+    return juce::JSON::toString(juce::var(root.release()), s.featureVersion != 0);
 }
 
 juce::String BridgeValidator::toJson(const DrumGuideSnapshot& g)
@@ -544,6 +581,34 @@ ValidationResult BridgeValidator::fromJson(const juce::String& jsonText, Sampler
     }
     if (const auto ref = parsed.getProperty("audioReference", {}); ref.isString() && ref.toString().isNotEmpty())
         s.audioReference = ref.toString();
+    if (parsed.hasProperty("features"))
+    {
+        const auto f = parsed["features"];
+        s.featureVersion = (int) f.getProperty("version", 0);
+        const auto* rows = f.getProperty("steps", {}).getArray();
+        if (!f.isObject() || s.featureVersion != 1 || f.getProperty("method", "").toString() != "source_projection"
+            || rows == nullptr || rows->size() > 1024)
+            return ValidationResult::failure("Invalid context feature capability");
+        for (const auto& value : *rows)
+        {
+            const auto* row = value.getArray();
+            if (row == nullptr || row->size() != 20)
+                return ValidationResult::failure("Invalid context feature row");
+            for (const auto& cell : *row)
+                if (!(cell.isInt() || cell.isInt64() || cell.isDouble()))
+                    return ValidationResult::failure("Context feature cells must be numbers");
+            ContextStep step;
+            step.energy = (float) (double) (*row)[0]; step.onset = (float) (double) (*row)[1];
+            step.low = (float) (double) (*row)[2]; step.mid = (float) (double) (*row)[3]; step.high = (float) (double) (*row)[4];
+            for (int pc = 0; pc < 12; ++pc) step.chroma[(size_t) pc] = (float) (double) (*row)[5 + pc];
+            const double bass = (double) (*row)[17];
+            if (!isFiniteInRange(bass, -1, 127) || bass != std::floor(bass))
+                return ValidationResult::failure("Invalid context bass pitch");
+            step.bassMidi = (int) bass;
+            step.bassConfidence = (float) (double) (*row)[18]; step.confidence = (float) (double) (*row)[19];
+            s.features.push_back(step);
+        }
+    }
 
     const auto check = validate(s);
     if (!check.ok) return check;

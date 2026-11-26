@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -133,6 +134,16 @@ struct LowEndDto
     std::vector<float> occupancy;
 };
 
+// Optional capability in v1. Rows follow the MAIN timeline, one sixteenth per row.
+// Values are projected from cached source analysis, with uncertainty kept explicitly.
+struct ContextStep
+{
+    float energy = 0, onset = 0, low = 0, mid = 0, high = 0;
+    std::array<float, 12> chroma {};
+    int bassMidi = -1;
+    float bassConfidence = 0, confidence = 0;
+};
+
 struct SamplerContextSnapshot
 {
     juce::String schema = kSamplerContextSchemaV1;
@@ -155,12 +166,13 @@ struct SamplerContextSnapshot
     std::vector<HarmonySegmentDto> harmony;
     std::vector<PhraseDto>         phrases;
     LowEndDto                      lowEnd;
+    int featureVersion = 0; // 0 = legacy peer, 1 = source feature projection
+    std::vector<ContextStep> features;
 
     int          algorithmVersion = 1;
     juce::String unknownPolicy    = "null";
 
-    // Optional: a local WAV of the MAIN mix (one loop at transport.bpm), written by HPSAMPLER next to its bridge
-    // slot. HPDG can load it as its analysis sample (Sample Analysis -> HPSAMPLER). Never embedded in the JSON.
+    // Legacy peers may send a WAV path. Live context consumers use metadata.
     std::optional<juce::String> audioReference;
 };
 

@@ -105,7 +105,7 @@ HPSamplerProcessor::~HPSamplerProcessor()
 {
     stopTimer();
     *alive = false;
-    contextPool.removeAllJobs(true, 20000); // a MAIN render in flight holds pad sounds of the engine
+    contextPool.removeAllJobs(true, 20000);
     session.reset(); // closes the slot: a connected HPDG shows Disconnected
 }
 
@@ -160,6 +160,7 @@ void HPSamplerProcessor::mutateNoUndo(const std::function<void(ProjectState&)>& 
 
 void HPSamplerProcessor::onProjectChanged()
 {
+    ++contextGeneration;
     contextDirty = true;
     lastProjectChangeMs = juce::Time::getMillisecondCounter();
     syncEngine();
@@ -290,7 +291,7 @@ void HPSamplerProcessor::timerCallback()
         session->setBpm((float) st.settings.bpm);
         // debounce: send the MAIN context 400 ms after the last edit, only while connected (no regeneration in HPDG)
         if (autoSyncContext && contextDirty && session->getState() == hpbridge::BridgeConnectionState::Connected
-            && juce::Time::getMillisecondCounter() - lastProjectChangeMs > 400 && !renderer.isBusy())
+            && juce::Time::getMillisecondCounter() - lastProjectChangeMs > 400)
             sendContextNow();
         if ((guidePoll % 30) == 0) updateBridgeName();
     }
@@ -997,70 +998,38 @@ void HPSamplerProcessor::sendContextNow()
     if (contextJobRunning) { contextDirty = true; return; } // sent again when the running one is published
     contextDirty = false;
     const auto rev = session->getPublishedRevision() + 1;
-    auto snap = BridgeAdapter::buildSamplerContext(project, rev, instanceId);
-    const auto& st = project.state();
-    const auto dir = hpbridge::bridgeDirectory().getChildFile("audio")
-                         .getChildFile(juce::String::toHexString((juce::int64) session->getInstanceId()).paddedLeft('0', 16));
-    if (st.events.empty()) { publishContext(std::move(snap), {}); return; }
-
-    // "HPSAMPLER main 83 BPM B min.wav": the tempo / key labels HPDG trusts (still checked against the audio)
-    juce::String name = "HPSAMPLER main " + (std::abs(st.settings.bpm - std::round(st.settings.bpm)) < 0.05
-                                                 ? juce::String(juce::roundToInt(st.settings.bpm)) : juce::String(st.settings.bpm, 1)) + " BPM";
-    if (st.settings.key.known())
-    {
-        static const char* names[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-        name << " " << names[st.settings.key.root] << (st.settings.key.mode == 1 ? " maj" : " min");
-    }
-    const auto file = dir.getChildFile(name + " r" + juce::String(rev) + ".wav");
-
-    // the sounds stay alive while the job reads them: the engine frees a replaced sound only when nobody uses it
-    std::array<const PadSound*, kNumPads> sounds {};
-    for (int i = 0; i < kNumPads; ++i)
-        if ((sounds[(size_t) i] = engine.padSound(i)) != nullptr) sounds[(size_t) i]->users.fetch_add(1);
-    std::shared_ptr<const EngineSnapshot> es(buildSnapshot().release());
-    const double rate = engineRate;
+    const auto state = project.state();
+    std::array<std::shared_ptr<const SourceData>, kNumSources> sources;
+    for (int i = 0; i < kNumSources; ++i) sources[(size_t) i] = project.sourceDataForSlot(i);
+    const auto generation = contextGeneration;
+    const auto id = instanceId;
     contextJobRunning = true;
-    contextPool.addJob([this, flag = alive, snap = std::move(snap), sounds, es, rate, dir, file]() mutable
+    contextPool.addJob([this, flag = alive, state, sources, generation, id, rev]()
     {
-        juce::String path;
-        if (*flag)
-        {
-            juce::AudioBuffer<float> out;
-            Engine::renderOffline(*es, sounds, rate, out, 0.0); // exactly one loop: HPDG reads N bars
-            dir.createDirectory();
-            if (std::unique_ptr<juce::FileOutputStream> stream(file.createOutputStream()); stream != nullptr)
-            {
-                juce::WavAudioFormat wav;
-                if (std::unique_ptr<juce::AudioFormatWriter> w(wav.createWriterFor(stream.get(), rate, 2, 24, {}, 0)); w != nullptr)
-                {
-                    stream.release();
-                    w->writeFromAudioSampleBuffer(out, 0, out.getNumSamples());
-                    path = file.getFullPathName();
-                }
-            }
-            // write next to the old files, then remove the old ones (HPDG may still be reading the previous revision)
-            auto olds = dir.findChildFiles(juce::File::findFiles, false, "*.wav");
-            std::sort(olds.begin(), olds.end(), [](const juce::File& a, const juce::File& b) { return a.getLastModificationTime() > b.getLastModificationTime(); });
-            for (int i = 0; i < olds.size(); ++i)
-                if (olds[i] != file && i >= 2) olds.getReference(i).deleteFile(); // keep the newest two
-        }
-        for (auto* s : sounds) if (s != nullptr) s->users.fetch_sub(1);
-        juce::MessageManager::callAsync([this, flag, snap = std::move(snap), path]() mutable
+        if (!*flag) return;
+        Project input;
+        input.replaceState(state, true);
+        for (const auto& source : sources) if (source) input.setSourceData(source);
+        auto snap = BridgeAdapter::buildSamplerContext(input, rev, id);
+        juce::MessageManager::callAsync([this, flag, snap = std::move(snap), generation]() mutable
         {
             if (!*flag) return;
             contextJobRunning = false;
-            publishContext(std::move(snap), path);
+            if (generation != contextGeneration) { contextDirty = true; return; }
+            publishContext(std::move(snap));
         });
     });
 }
 
-void HPSamplerProcessor::publishContext(hpbridge::SamplerContextSnapshot snap, const juce::String& wavPath)
+void HPSamplerProcessor::publishContext(hpbridge::SamplerContextSnapshot snap)
 {
     if (session == nullptr) return;
-    if (wavPath.isNotEmpty()) snap.audioReference = wavPath;
     const auto check = hpbridge::BridgeValidator::validate(snap);
     if (!check.ok) { setStatus("Context not sent: " + check.error); return; }
-    const auto rev = session->publish(hpbridge::kSamplerContextSchemaV1, hpbridge::BridgeValidator::toJson(snap));
+    const auto json = hpbridge::BridgeValidator::toJson(snap);
+    if (json.getNumBytesAsUTF8() > hpbridge::kSlotPayloadBytes)
+    { setStatus("Context exceeds the bridge payload limit"); return; }
+    const auto rev = session->publish(hpbridge::kSamplerContextSchemaV1, json);
     bridgeStatus = "HP Bridge: " + session->getStatusText() + "  |  context rev " + juce::String(rev)
                    + (session->getPartnerAckRevision() > 0 ? "  (HPDG has rev " + juce::String(session->getPartnerAckRevision()) + ")" : juce::String());
     listeners.call([](Listener& l) { l.statusChanged(); });

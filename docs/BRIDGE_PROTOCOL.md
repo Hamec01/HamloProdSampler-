@@ -5,12 +5,28 @@ HPSAMPLER `CONNECT HPDG` or HPDG `Connect to HPSAMPLER` (header, second row, rig
 
 | direction | schema | when |
 |---|---|---|
-| HPSAMPLER → HPDG | `hp.sample-context.v1` (MAIN: tempo, key, pattern events, beat grid, accents, swing) | on connect, then 400 ms after MAIN edits (toggle "Auto-send"), or "Send now" |
+| HPSAMPLER → HPDG | `hp.sample-context.v1` with optional `features.version=1` capability | on connect, then 400 ms after MAIN edits (toggle "Auto-send"), or "Send now" |
 | HPDG → HPSAMPLER | `hp.drum-guide.v1` (current drum pattern, bars, tempo, swing) | on connect, then when the HPDG pattern / parameters change |
 
-Neither side regenerates anything because of a message. HPDG keeps the received context; "Use HPSAMPLER tempo and key"
-is an explicit action. Feeding accents / harmony into the genre engines is a later stage, to be measured first (HPDG docs/RULES.md).
+In HPDG's Sample Analysis menu, select HPSAMPLER to use its musical context for Guide generation.
+Received edits update the stored guidance even with the editor closed. Press Generate to use it.
+Tempo / key following has its own toggle. Clear or loading an audio file ends the numeric Guide selection.
 HPSAMPLER shows the guide as the DRUM GUIDE overlay above the 4 lanes (never a 5th lane); "Follow HPDG drum guide" off = freeze.
+
+The live bridge sends no audio and creates no WAV files. Manual WAV export and loading that file into HPDG remain
+available through the existing file workflow.
+
+The optional feature capability uses compact rows on a sixteenth-note grid. Each row contains energy, onset,
+low / mid / high energy, twelve chroma values, bass MIDI note (-1 for unknown), bass confidence, and projection
+confidence. Floating-point cells are rounded to four decimal places. The method is `source_projection`.
+Older readers ignore this optional field. Updated HPDG requires the capability when selecting HPSAMPLER as its
+Guide source and continues accepting legacy tempo / key metadata. A legacy `audioReference` never triggers analysis.
+
+HPSAMPLER projects cached source measurements through MAIN timing, pad speed / pitch / reverse, envelopes and cuts.
+Band filtering and overlapping audio are approximations. Phase cancellation, nonlinear master clipping, very short
+transients between grid samples, and stretch-induced spectral changes are not measured by this projection. Bass
+observations beyond the source analyzer's measured window remain unknown. Chroma is sent as evidence and does not
+assert a chord root. Treat projection confidence as a conservative influence score, without statistical calibration.
 
 ## Transport
 

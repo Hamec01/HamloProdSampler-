@@ -51,6 +51,7 @@ void computeFeatures(const juce::AudioBuffer<float>& audio, double sr, double tu
     a.specHop = hop * 2;
     a.onsetCurve.assign((size_t) frames, 0.0f);
     a.rms.assign((size_t) frames, 0.0f);
+    a.bandRms.assign((size_t) frames, {});
     a.specCols = (frames + 1) / 2;
     a.spectrogram.assign((size_t) a.specCols * (size_t) a.specBins, 0);
     a.chroma.assign((size_t) a.specCols, {});
@@ -98,16 +99,20 @@ void computeFeatures(const juce::AudioBuffer<float>& audio, double sr, double tu
         fft.performFrequencyOnlyForwardTransform(data.data());
 
         double flux = 0.0;
+        std::array<double, 3> bandPower {};
         for (int bin = 1; bin < N / 2; ++bin)
         {
             const float m = data[(size_t) bin] * norm;
             const float lm = std::log1p(100.0f * m);
             const float d = lm - prev[(size_t) bin];
             const double hz = bin * binHz;
+            if (hz >= 20.0 && hz <= 16000.0)
+                bandPower[hz < 150.0 ? 0 : hz < 2000.0 ? 1 : 2] += (double) m * m / 0.75;
             if (d > 0.0f) flux += d * (hz < 200.0 ? 1.2 : (hz < 5000.0 ? 1.0 : 0.6));
             prev[(size_t) bin] = lm;
         }
         a.onsetCurve[(size_t) f] = (float) flux;
+        for (size_t b = 0; b < 3; ++b) a.bandRms[(size_t) f][b] = (float) std::sqrt(bandPower[b]);
 
         if ((f & 1) == 0)
         {
@@ -142,6 +147,7 @@ void computeFeatures(const juce::AudioBuffer<float>& audio, double sr, double tu
         const float ref = std::max(1.0e-9f, tmp[std::min(k, tmp.size() - 1)]);
         for (auto& x : v) x = std::min(1.0f, x / ref);
     };
+    a.absoluteRms = a.rms;
     normalise(a.onsetCurve);
     normalise(a.rms);
 
@@ -365,6 +371,8 @@ void SourceAnalyzer::analyse(SourceData& data, const juce::File& file, const std
     {
         a.key = { harmony.keyRoot, harmony.scaleMode };
         a.keyConfidence = harmony.keyConfidence;
+        for (const auto& b : harmony.bass)
+            a.bass.push_back({ b.startSeconds, b.endSeconds, b.midiNote, b.confidence });
     }
     // Percussion / noise: never silently transpose. A drum loop with no stated key, or a key the
     // chroma cannot support, is Unknown.

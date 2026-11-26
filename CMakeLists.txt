@@ -8,7 +8,7 @@ set(JUCE_TARGET_ARCHITECTURE "x86_64")
 
 include(CTest)
 
-set(HPSAMPLER_JUCE_DIR "C:/DRUMENGINE/JUCE" CACHE PATH "Path to local JUCE 8 checkout")
+set(HPSAMPLER_JUCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../HPDG/JUCE" CACHE PATH "Path to local JUCE 8 checkout")
 if (NOT EXISTS "${HPSAMPLER_JUCE_DIR}/CMakeLists.txt")
     message(FATAL_ERROR "JUCE not found at ${HPSAMPLER_JUCE_DIR}. Set -DHPSAMPLER_JUCE_DIR=<path>.")
 endif()

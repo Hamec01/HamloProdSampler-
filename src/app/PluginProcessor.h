@@ -158,15 +158,12 @@ public:
     bool autoSyncContext = true;   // HPSAMPLER -> HPDG: send the MAIN context when it changes (never regenerates HPDG)
     bool followGuide = true;       // HPDG -> HPSAMPLER: accept new drum guides (off = Freeze Guide)
     void sendContextNow();
-    // One loop of MAIN rendered to %LOCALAPPDATA%\HamloProd\Bridge\audio\<id>\ (tempo + key in the file name, read by
-    // HPDG's label reader). Empty file when the pattern is empty.
-    // MAIN audio for HPDG: rendered and written on a background thread (a 16-bar render on the message thread froze
-    // the editor for about a second after every edit while HPDG was connected)
-    void publishContext(hpbridge::SamplerContextSnapshot snap, const juce::String& wavPath);
+    void publishContext(hpbridge::SamplerContextSnapshot snap);
     juce::ThreadPool contextPool { juce::ThreadPoolOptions {}.withThreadName("HPSAMPLER context").withNumberOfThreads(1)
                                        .withDesiredThreadPriority(juce::Thread::Priority::low) };
     std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
     bool contextJobRunning = false;
+    uint64_t contextGeneration = 0;
     juce::String bridgeStatus;
     bool exportSamplerContext(juce::File& written, juce::String& error);
     bool importDrumGuide(const juce::File& f, juce::String& error);
