@@ -32,6 +32,7 @@ private:
 class HPSamplerEditor : public juce::AudioProcessorEditor,
                         public juce::DragAndDropContainer,
                         private HPSamplerProcessor::Listener,
+                        private juce::AsyncUpdater,
                         private juce::Timer
 {
 public:
@@ -42,8 +43,15 @@ public:
     bool keyPressed(const juce::KeyPress&) override;
 
 private:
-    void projectChanged() override;
-    void statusChanged() override;
+    // Listener calls only mark what changed; the refresh runs once per message-loop pass (a knob drag or a
+    // bank of 16 pad renders used to rebuild every view per step). Status-only refreshes: at most ~30 per second.
+    void projectChanged() override { projectPending = true; triggerAsyncUpdate(); }
+    void statusChanged() override { statusPending = true; triggerAsyncUpdate(); }
+    void handleAsyncUpdate() override;
+    void refreshProject();
+    void refreshStatus(bool viewsToo);
+    bool projectPending = false, statusPending = false;
+    juce::uint32 lastStatusMs = 0;
     void timerCallback() override;
     void parentHierarchyChanged() override { updateWindowOpen(); }
     void visibilityChanged() override { updateWindowOpen(); }

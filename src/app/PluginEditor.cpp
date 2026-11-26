@@ -118,14 +118,15 @@ HPSamplerEditor::HPSamplerEditor(HPSamplerProcessor& p) : juce::AudioProcessorEd
     setSize(1360, 860);
     showView(proc.ui.view);
     openInspector(proc.ui.inspectorOpen);
-    projectChanged();
-    statusChanged();
+    refreshProject();
+    refreshStatus(true);
     startTimerHz(10);
 }
 
 HPSamplerEditor::~HPSamplerEditor()
 {
     stopTimer();
+    cancelPendingUpdate();
     proc.engine.windowOpen = false;
     proc.removeListener(this);
     juce::LookAndFeel::setDefaultLookAndFeel(nullptr);
@@ -190,7 +191,15 @@ void HPSamplerEditor::locatePad(int pad)
     sourceView.refresh();
 }
 
-void HPSamplerEditor::projectChanged()
+void HPSamplerEditor::handleAsyncUpdate()
+{
+    const bool project = std::exchange(projectPending, false);
+    if (project) refreshProject();
+    if (statusPending && (project || juce::Time::getMillisecondCounter() - lastStatusMs >= 33))
+        refreshStatus(!project); // the project refresh already covered the pads and the inspector
+}
+
+void HPSamplerEditor::refreshProject()
 {
     undoBtn.setEnabled(proc.project.canUndo());
     redoBtn.setEnabled(proc.project.canRedo());
@@ -205,8 +214,10 @@ void HPSamplerEditor::projectChanged()
     for (auto* b : srcBtns) b->repaint();
 }
 
-void HPSamplerEditor::statusChanged()
+void HPSamplerEditor::refreshStatus(bool viewsToo)
 {
+    statusPending = false;
+    lastStatusMs = juce::Time::getMillisecondCounter();
     statusLabel.setText(proc.status, juce::dontSendNotification);
     bridgeLabel.setText(proc.bridgeStatus, juce::dontSendNotification);
     bridgeLabel.setColour(juce::Label::textColourId, proc.session->getState() == hpbridge::BridgeConnectionState::Connected ? theme::ok : theme::textDim);
@@ -222,6 +233,7 @@ void HPSamplerEditor::statusChanged()
                             : "No HPDG with Connect support is running (insert HPDG, or click for file options)");
     bridgeBtn.setToggleState(on || st == hpbridge::BridgeConnectionState::Stale, juce::dontSendNotification);
     bridgeBtn.getProperties().set("led", (juce::int64) (on ? theme::ok : theme::warn).getARGB());
+    if (!viewsToo) return;
     padGrid.refresh();
     if (inspector.isVisible()) inspector.refresh();
     for (auto* b : srcBtns) b->repaint();
@@ -240,6 +252,7 @@ void HPSamplerEditor::updateWindowOpen()
 void HPSamplerEditor::timerCallback()
 {
     updateWindowOpen();
+    if (statusPending && !isUpdatePending()) refreshStatus(true); // held back by the 30-per-second limit
     // keep loading indicators fresh
     for (int i = 0; i < kNumSources; ++i) if (proc.isSourceLoading(i)) srcBtns[i]->repaint();
     // every 2 s: how many HPDG can be connected (shown on the button)
