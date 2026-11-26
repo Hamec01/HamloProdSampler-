@@ -407,9 +407,11 @@ void PadRenderer::submit(PadRenderJob job)
             return std::find(wanted.begin(), wanted.end(), m) == wanted.end();
         }), masters.end());
     }
+    // Below the DAW: half the physical cores at most, at low priority. Six workers on 8 logical cores shared the
+    // physical cores (Hyper-Threading) with the DAW's audio threads, which the thread priority does not prevent.
     if (workers.isEmpty())
-        for (int i = juce::jlimit(2, 6, juce::SystemStats::getNumCpus() - 2); --i >= 0;)
-            workers.add(new Worker(*this))->startThread();
+        for (int i = juce::jlimit(1, 3, juce::SystemStats::getNumPhysicalCpus() / 2); --i >= 0;)
+            workers.add(new Worker(*this))->startThread(juce::Thread::Priority::low);
     for (auto* w : workers) w->notify();
 }
 

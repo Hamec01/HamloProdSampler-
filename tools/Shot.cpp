@@ -95,7 +95,7 @@ private:
         proc->assignToPad(1, 0, beat * 2, beat * 3);
         if (proc->project.sourceDataForSlot(1)) proc->assignToPad(2, 1, beat, beat * 2);
         proc->project.edit("cut", [](ProjectState& s) { s.pads[0].s.chokeGroup = 1; s.pads[1].s.chokeGroup = 1; s.pads[2].s.playMode = 0;
-            s.sources[0].filter = -0.45f; s.sources[1].pan = 0.4f; s.sources[1].gainDb = -4.0f;
+            s.sources[0].highCutHz = 3000.0f; s.sources[0].lowCutHz = 120.0f; s.sources[1].pan = 0.4f; s.sources[1].gainDb = -4.0f;
             s.pads[0].s.gainDb = -6.0f; s.pads[1].s.pan = -0.5f; filterKnobToHz(0.35f, s.pads[2].s.hpHz, s.pads[2].s.lpHz); });
         v.candidates = ChopEngine::findSpots(*d, beat * 8, beat * 16, {}, proc->gridForSource(0));
         proc->project.edit("pattern", [](ProjectState& s)

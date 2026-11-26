@@ -58,4 +58,27 @@ public:
     void drawRotarySlider(juce::Graphics&, int x, int y, int w, int h, float pos, float startAngle, float endAngle,
                           juce::Slider&) override;
 };
+
+// The mouse wheel turns a slider / knob only after a click on it, and only while the mouse stays over it: scrolling a
+// panel never changes a value by accident. Leaving the control ends it (the wheel then scrolls the panel again).
+inline void wheelAfterClick(juce::Slider& s)
+{
+    struct Arm : juce::MouseListener
+    {
+        static juce::Slider* sliderOf(juce::Component* c)
+        {
+            for (; c != nullptr; c = c->getParentComponent()) if (auto* sl = dynamic_cast<juce::Slider*>(c)) return sl;
+            return nullptr;
+        }
+        void mouseDown(const juce::MouseEvent& e) override { if (auto* sl = sliderOf(e.eventComponent)) sl->setScrollWheelEnabled(true); }
+        void mouseExit(const juce::MouseEvent& e) override
+        {
+            if (auto* sl = sliderOf(e.eventComponent); sl != nullptr && !sl->isMouseOver(true)) sl->setScrollWheelEnabled(false);
+        }
+    };
+    static Arm arm; // stateless, shared by every slider (a component drops its listeners when it is deleted)
+    s.setScrollWheelEnabled(false);
+    s.removeMouseListener(&arm);
+    s.addMouseListener(&arm, true);
+}
 } // namespace hps

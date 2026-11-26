@@ -590,7 +590,8 @@ void PadGrid::timerCallback()
         bool dirty = false;
         if (hits != p->lastHits) { p->lastHits = hits; p->flash = 1.0f; dirty = true; }
         if (p->flash > 0.0f) { p->flash = std::max(0.0f, p->flash - 0.12f); dirty = true; }
-        if (proc.engine.padVoices[(size_t) pad].load() > 0) dirty = true;
+        // only when it starts / stops sounding: a pad that plays on and on is not redrawn 30 times a second
+        if (const bool snd = proc.engine.padVoices[(size_t) pad].load() > 0; snd != p->wasSounding) { p->wasSounding = snd; dirty = true; }
         if (const bool r = proc.isPadRendering(pad); r || p->wasRendering) { p->wasRendering = r; dirty = true; }
         if (dirty) p->repaint();
     }

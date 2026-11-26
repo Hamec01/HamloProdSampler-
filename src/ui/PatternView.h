@@ -67,6 +67,8 @@ public:
     void showTicks(double start, double len);
     void clampView();
     void followPlayhead();
+    void repaintPlayhead(); // only the strips the moving playhead touches (old and new position, overview)
+    float lastPlayheadX = -100.0f;
     bool isDragging() const { return drag != Drag::None; }
 
     int64_t cursorTick = 0;                  // paste position (last click)
@@ -104,7 +106,8 @@ private:
     double panStart = 0; int panScroll = 0;
     int downRow = 0, lastPadShift = 0;
     int auditionPad = -1;
-    std::array<std::array<std::unique_ptr<MixKnob>, 3>, kNumSources> laneKnobs; // VOL / PAN / FILTER per source
+    static constexpr int kLaneKnobs = 4;
+    std::array<std::array<std::unique_ptr<MixKnob>, kLaneKnobs>, kNumSources> laneKnobs; // VOL / PAN / LOW CUT / HIGH CUT per source
 };
 
 class PatternView : public juce::Component, private juce::Timer
@@ -186,5 +189,6 @@ private:
     std::vector<PatternEvent> clipboard;
     int lastTab = -1;
     bool wasPlaying = false;
+    uint64_t lastSounding = 0; // pads sounding at the last frame (row labels light up)
 };
 } // namespace hps

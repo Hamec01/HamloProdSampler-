@@ -97,6 +97,7 @@ struct EngineSnapshot
     bool mainNeedsWindow = false;                  // MAIN follows the DAW only while windowOpen
     HostPlays hostPlays = HostPlays::Both;         // what sounds while the DAW plays
     HostCapture hostCapture = HostCapture::WhenRecording;
+    bool hostHidesRecording = false;               // the host never says it records (FL Studio): WhenRecording = while it plays
 };
 
 struct PreviewSource
@@ -150,6 +151,9 @@ public:
     void padUp(int pad, int pointer = 0);                     // NoteOff (GUI)
     void previewRange(int slot, int64_t start, int64_t end, bool loop);
     void stopPreview();
+    // a playing audition of `slot` takes the new range / position without starting over (else: starts it)
+    void previewUpdate(int slot, int64_t start, int64_t end, bool loop);
+    void previewSeek(int slot, int64_t frame); // jump inside a playing audition (ignored when none plays)
     void setInternalPlaying(bool shouldPlay, bool fromStart = false);
     void playFrom(int64_t loopTick); // internal transport from a position (Playback tool)
     void playWithCountIn();          // one bar of clicks (1-2-3-4), then MAIN from bar 1
@@ -206,12 +210,13 @@ private:
         bool loop = false;
         bool toggle = false;
         Svf hp[2], lp[2];
-        float hpG = 0, hpK = 0, lpG = 0, lpK = 0;
+        float hpG = 0, hpK = 0, hpA = 1, lpG = 0, lpK = 0, lpA = 1;
+        float hpHz = -1.0f, lpHz = -1.0f; // the cutoffs the coefficients are for
         bool useHp = false, useLp = false;
     };
     struct Cmd
     {
-        enum Type : uint8_t { PadOn, PadOff, Preview, PreviewStop, Play, Stop, Panic, StopAll } type = PadOn;
+        enum Type : uint8_t { PadOn, PadOff, Preview, PreviewStop, Play, Stop, Panic, StopAll, PreviewUpdate, PreviewSeek } type = PadOn;
         int pad = 0;
         float vel = 1.0f;
         uint32_t token = 0;
@@ -260,6 +265,7 @@ private:
     double ticksPerSample = 0.0;
     bool wasPlaying = false;
     bool wasHostDriving = false;
+    bool hostEverRecorded = false; // the host has reported recording at least once
     bool hostDriving = false;
     bool windowLatched = false, wasGated = false;
     uint32_t pass = 0;

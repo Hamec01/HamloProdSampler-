@@ -114,6 +114,7 @@ public:
     void updateFit() { syncEngine(); }
     bool fitReady(int slot) const { return fitPublished[(size_t) slot] != 0; }
     void clearPad(int pad);
+    int  clearBank(int bank);           // every pad of the bank and its MAIN notes, one undo step; returns pads cleared
     void copyPad(int pad) { clipboard = project.state().pads[(size_t) pad]; hasClipboard = true; }
     void pastePad(int pad);
     void triggerPad(int pad, float velocity, int pointer); // GUI NoteOn (+ focus)
@@ -156,7 +157,13 @@ public:
     void sendContextNow();
     // One loop of MAIN rendered to %LOCALAPPDATA%\HamloProd\Bridge\audio\<id>\ (tempo + key in the file name, read by
     // HPDG's label reader). Empty file when the pattern is empty.
-    juce::File writeMainAudioReference();
+    // MAIN audio for HPDG: rendered and written on a background thread (a 16-bar render on the message thread froze
+    // the editor for about a second after every edit while HPDG was connected)
+    void publishContext(hpbridge::SamplerContextSnapshot snap, const juce::String& wavPath);
+    juce::ThreadPool contextPool { juce::ThreadPoolOptions {}.withThreadName("HPSAMPLER context").withNumberOfThreads(1)
+                                       .withDesiredThreadPriority(juce::Thread::Priority::low) };
+    std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
+    bool contextJobRunning = false;
     juce::String bridgeStatus;
     bool exportSamplerContext(juce::File& written, juce::String& error);
     bool importDrumGuide(const juce::File& f, juce::String& error);
@@ -169,6 +176,7 @@ public:
     void setStatus(const juce::String& s);
 
     const juce::String instanceId = juce::Uuid().toDashedString();
+    const bool hostIsFL = juce::PluginHostType().isFruityLoops();
 
 private:
     void timerCallback() override;

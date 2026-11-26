@@ -66,18 +66,20 @@ LaneCanvas::LaneCanvas(PatternView& o) : owner(o)
 {
     setWantsKeyboardFocus(false);
     for (int lane = 0; lane < kNumSources; ++lane)
-        for (int k = 0; k < 3; ++k)
+        for (int k = 0; k < kLaneKnobs; ++k)
         {
-            auto knob = std::make_unique<MixKnob>(k == 0 ? MixKnob::Kind::Volume : k == 1 ? MixKnob::Kind::Pan : MixKnob::Kind::Filter);
+            static constexpr MixKnob::Kind kinds[kLaneKnobs] = { MixKnob::Kind::Volume, MixKnob::Kind::Pan, MixKnob::Kind::LowCut, MixKnob::Kind::HighCut };
+            auto knob = std::make_unique<MixKnob>(kinds[k]);
             auto* raw = knob.get();
             raw->onGestureStart = [this] { owner.proc.project.beginGesture("SRC mix"); };
             raw->onGestureEnd = [this] { owner.proc.project.endGesture(); };
             raw->onChange = [this, lane, k](float v)
             {
-                owner.proc.project.edit("SRC " + juce::String(lane + 1) + (k == 0 ? " volume" : k == 1 ? " pan" : " filter"), [&](ProjectState& s)
+                static const char* names[kLaneKnobs] = { " volume", " pan", " low cut", " high cut" };
+                owner.proc.project.edit("SRC " + juce::String(lane + 1) + names[k], [&](ProjectState& s)
                 {
                     auto& src = s.sources[(size_t) lane];
-                    if (k == 0) src.gainDb = v; else if (k == 1) src.pan = v; else src.filter = v;
+                    if (k == 0) src.gainDb = v; else if (k == 1) src.pan = v; else if (k == 2) src.lowCutHz = v; else src.highCutHz = v;
                 });
             };
             addAndMakeVisible(raw);
@@ -97,11 +99,11 @@ void LaneCanvas::layoutKnobs()
         const auto well = juce::Rectangle<int>(10, r.getY() + 31, kLabelW - 16, 36);
         const bool fits = has && r.getHeight() >= 70 && well.getY() >= area.getY() && well.getBottom() <= area.getBottom();
         auto row = well;
-        for (int k = 0; k < 3; ++k)
+        for (int k = 0; k < kLaneKnobs; ++k)
         {
             auto& knob = *laneKnobs[(size_t) lane][(size_t) k];
             knob.setVisible(fits);
-            knob.setBounds(row.removeFromLeft(row.getWidth() / (3 - k)).withSizeKeepingCentre(38, 36));
+            knob.setBounds(row.removeFromLeft(row.getWidth() / (kLaneKnobs - k)).withSizeKeepingCentre(33, 36));
         }
     }
 }
@@ -115,7 +117,8 @@ void LaneCanvas::updateKnobs()
         auto& k = laneKnobs[(size_t) lane];
         k[0]->setValueQuietly(s.gainDb);
         k[1]->setValueQuietly(s.pan);
-        k[2]->setValueQuietly(s.filter);
+        k[2]->setValueQuietly(s.lowCutHz);
+        k[3]->setValueQuietly(s.highCutHz);
         for (auto& knob : k) { knob->setAccent(s.colour); knob->setEnabled(!s.empty()); }
     }
     layoutKnobs();
@@ -250,6 +253,16 @@ void LaneCanvas::followPlayhead()
     if (!ui.followPlayhead || ui.mainTicks <= 0 || isDragging()) return;
     const double t = owner.proc.engine.playheadTick.load(), vt = visibleTicks();
     if (t < ui.mainStart || t >= ui.mainStart + vt) { ui.mainStart = t; clampView(); }
+}
+
+void LaneCanvas::repaintPlayhead()
+{
+    const float x = owner.proc.engine.transportPlaying.load() ? (float) tickToX(owner.proc.engine.playheadTick.load()) : -100.0f;
+    if (std::abs(x - lastPlayheadX) < 0.5f) return;
+    if (lastPlayheadX > -50.0f) repaint((int) lastPlayheadX - 3, 0, 7, getHeight());
+    if (x > -50.0f) repaint((int) x - 3, 0, 7, getHeight());
+    repaint(0, 0, getWidth(), kNavH); // the playhead in the overview
+    lastPlayheadX = x;
 }
 
 int64_t LaneCanvas::snapTick(double t, bool floorIt) const
@@ -1582,13 +1595,28 @@ void PatternView::refresh()
 
 void PatternView::timerCallback()
 {
-    bool sounding = false;
-    for (const auto& v : proc.engine.padVoices) if (v.load() > 0) { sounding = true; break; }
+    // The whole lane canvas is redrawn only when its content moves (follow scroll, stop, tab). While the DAW plays,
+    // only the playhead strips and the row labels of pads that start / stop sounding are: a full redraw of a big
+    // window 30 times a second made FL crackle at small buffers even with the plug-in window in the background.
+    uint64_t sounding = 0;
+    for (int i = 0; i < kNumPads; ++i) if (proc.engine.padVoices[(size_t) i].load() > 0) sounding |= 1ull << i;
     const bool playing = proc.engine.transportPlaying.load();
+    const double viewBefore = proc.ui.mainStart;
     if (playing) lanes.followPlayhead();
     const bool stopped = wasPlaying && !playing;
     wasPlaying = playing;
-    if (playing || stopped || sounding || lastTab != proc.ui.mainTab) { lanes.repaint(); lastTab = proc.ui.mainTab; }
+    if (stopped || proc.ui.mainStart != viewBefore || lastTab != proc.ui.mainTab)
+    {
+        lanes.repaint();
+        lanes.lastPlayheadX = -100.0f;
+        lastTab = proc.ui.mainTab;
+    }
+    else
+    {
+        if (playing) lanes.repaintPlayhead();
+        if (sounding != lastSounding && proc.ui.padRows) lanes.repaint(0, 0, LaneCanvas::kLabelW, lanes.getHeight());
+    }
+    lastSounding = sounding;
 }
 
 void PatternView::paint(juce::Graphics& g)

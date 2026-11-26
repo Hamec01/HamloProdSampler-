@@ -120,6 +120,11 @@ target_link_libraries(HPSAMPLER_Tests PRIVATE HPSAMPLER_Core)
 target_compile_definitions(HPSAMPLER_Tests PRIVATE JUCE_STANDALONE_APPLICATION=1)
 add_test(NAME HPSAMPLER_Tests COMMAND HPSAMPLER_Tests)
 
+# Audio-thread cost per block at small buffers (not a test: prints timings)
+add_executable(HPSAMPLER_EngineBench tests/EngineBench.cpp)
+target_link_libraries(HPSAMPLER_EngineBench PRIVATE HPSAMPLER_Core)
+target_compile_definitions(HPSAMPLER_EngineBench PRIVATE JUCE_STANDALONE_APPLICATION=1)
+
 # Visual review tool: renders the real editor to PNG (not shipped)
 add_executable(HPSAMPLER_Shot WIN32 tools/Shot.cpp)
 target_link_libraries(HPSAMPLER_Shot PRIVATE HPSAMPLER HPSAMPLER_Core juce::juce_audio_utils)

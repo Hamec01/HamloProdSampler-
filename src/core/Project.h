@@ -31,7 +31,8 @@ struct SourceSlot
     // source lane mix (applied to every pad of this source)
     float  gainDb = 0.0f;
     float  pan = 0.0f;
-    float  filter = 0.0f;   // one-knob filter (see filterKnobToHz)
+    float  lowCutHz = 20.0f;     // high-pass of the lane (20 = off)
+    float  highCutHz = 20000.0f; // low-pass of the lane (20000 = off)
 
     bool empty() const noexcept { return id.isEmpty(); }
 };

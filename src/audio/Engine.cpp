@@ -6,17 +6,17 @@ namespace hps
 {
 namespace
 {
-inline void svfCoeffs(float fc, double sr, float& g, float& k)
+inline void svfCoeffs(float fc, double sr, float& g, float& k, float& a1)
 {
     fc = juce::jlimit(10.0f, (float) (sr * 0.45), fc);
     g = std::tan(juce::MathConstants<float>::pi * fc / (float) sr);
     k = 1.41421356f; // Q = 0.707
+    a1 = 1.0f / (1.0f + g * (g + k)); // once per block, not per sample
 }
 
 // TPT state-variable filter step; returns (lp, hp)
-inline void svfTick(float x, float g, float k, float& ic1, float& ic2, float& lp, float& hp)
+inline void svfTick(float x, float g, float k, float a1, float& ic1, float& ic2, float& lp, float& hp)
 {
-    const float a1 = 1.0f / (1.0f + g * (g + k));
     const float v3 = x - ic2;
     const float v1 = a1 * ic1 + g * a1 * v3;
     const float v2 = ic2 + g * v1;
@@ -81,6 +81,18 @@ void Engine::previewRange(int slot, int64_t start, int64_t end, bool loop)
 }
 
 void Engine::stopPreview() { Cmd c; c.type = Cmd::PreviewStop; pushCmd(c); }
+
+void Engine::previewUpdate(int slot, int64_t start, int64_t end, bool loop)
+{
+    Cmd c; c.type = Cmd::PreviewUpdate; c.slot = slot; c.a = start; c.b = end; c.flag = loop;
+    pushCmd(c);
+}
+
+void Engine::previewSeek(int slot, int64_t frame)
+{
+    Cmd c; c.type = Cmd::PreviewSeek; c.slot = slot; c.a = frame;
+    pushCmd(c);
+}
 
 void Engine::setInternalPlaying(bool shouldPlay, bool fromStart)
 {
@@ -240,8 +252,9 @@ void Engine::renderVoices(float* L, float* R, int n, const EngineSnapshot& s)
         const float hpHz = std::max(p.hpHz, m.hpHz), lpHz = std::min(p.lpHz, m.lpHz);
         v.useHp = hpHz > 25.0f;
         v.useLp = lpHz < 19000.0f;
-        if (v.useHp) svfCoeffs(hpHz, sr, v.hpG, v.hpK);
-        if (v.useLp) svfCoeffs(lpHz, sr, v.lpG, v.lpK);
+        // tan() only when a knob moved (this runs for every voice between every two events of a block)
+        if (v.useHp && hpHz != v.hpHz) { svfCoeffs(hpHz, sr, v.hpG, v.hpK, v.hpA); v.hpHz = hpHz; }
+        if (v.useLp && lpHz != v.lpHz) { svfCoeffs(lpHz, sr, v.lpG, v.lpK, v.lpA); v.lpHz = lpHz; }
         for (int i = 0; i < n; ++i)
         {
             int ip = (int) v.pos;
@@ -266,14 +279,14 @@ void Engine::renderVoices(float* L, float* R, int n, const EngineSnapshot& s)
             if (v.useHp)
             {
                 float lp, hp;
-                svfTick(xl, v.hpG, v.hpK, v.hp[0].ic1, v.hp[0].ic2, lp, hp); xl = hp;
-                svfTick(xr, v.hpG, v.hpK, v.hp[1].ic1, v.hp[1].ic2, lp, hp); xr = hp;
+                svfTick(xl, v.hpG, v.hpK, v.hpA, v.hp[0].ic1, v.hp[0].ic2, lp, hp); xl = hp;
+                svfTick(xr, v.hpG, v.hpK, v.hpA, v.hp[1].ic1, v.hp[1].ic2, lp, hp); xr = hp;
             }
             if (v.useLp)
             {
                 float lp, hp;
-                svfTick(xl, v.lpG, v.lpK, v.lp[0].ic1, v.lp[0].ic2, lp, hp); xl = lp;
-                svfTick(xr, v.lpG, v.lpK, v.lp[1].ic1, v.lp[1].ic2, lp, hp); xr = lp;
+                svfTick(xl, v.lpG, v.lpK, v.lpA, v.lp[0].ic1, v.lp[0].ic2, lp, hp); xl = lp;
+                svfTick(xr, v.lpG, v.lpK, v.lpA, v.lp[1].ic1, v.lp[1].ic2, lp, hp); xr = lp;
             }
             L[i] += xl * v.env * gl;
             R[i] += xr * v.env * gr;
@@ -442,6 +455,15 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
                     }
                     addEv(0, 1, c.pad, c.vel, c.token); break;
                 case Cmd::PadOff: addEv(0, 0, c.pad, 0.0f, c.token); break;
+                case Cmd::PreviewUpdate:
+                    if (previewActive && !previewStopping && previewSrc == c.slot)
+                    {
+                        // the edges moved while it plays: go on where it is, wrap to the start only when outside
+                        previewStart = (double) c.a; previewEnd = (double) std::max(c.a + 2, c.b); previewLoop = c.flag;
+                        if (previewPos < previewStart || previewPos >= previewEnd - 1.0) previewPos = previewStart;
+                        break;
+                    }
+                    [[fallthrough]];
                 case Cmd::Preview:
                     previewActive = true; previewStopping = false; previewSrc = juce::jlimit(0, kNumSources - 1, c.slot);
                     previewStart = (double) c.a; previewEnd = (double) std::max(c.a + 2, c.b); previewPos = previewStart;
@@ -452,6 +474,13 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
                     dropPendingOns(); // a pad and an audition in the same block: the later command wins
                     break;
                 case Cmd::PreviewStop: stopPreviewNow(); break;
+                case Cmd::PreviewSeek:
+                    if (previewActive && !previewStopping && previewSrc == c.slot)
+                    {
+                        previewPos = juce::jlimit(previewStart, std::max(previewStart, previewEnd - 2.0), (double) c.a);
+                        previewFrame.store(previewPos);
+                    }
+                    break;
                 case Cmd::Play:
                     if (hostDriving) break; // the DAW leads
                     fadeTokens(kSeqToken | handTokens);
@@ -532,7 +561,10 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
     // DAW stopped: everything it played stops (an offline render keeps its tails)
     if (!hostDriving && wasHostDriving && !host.offline) fadeTokens(kSeqToken | kMidiToken);
     hostDriven.store(hostDriving);
-    hostRecording.store(hostDriving && host.recording);
+    if (host.recording) hostEverRecorded = true;
+    // FL Studio does not tell a plug-in that it records: there "when the DAW records" means while it plays
+    const bool dawRecords = host.recording || (s.hostHidesRecording && !hostEverRecorded && s.hostCapture == HostCapture::WhenRecording);
+    hostRecording.store(hostDriving && dawRecords);
     hostBpm.store(host.valid ? host.bpm : 0.0);
     ticksPerSample = bpm / 60.0 * kPPQ / sr;
     loopTicks = std::max<int64_t>(kPPQ, s.loopTicks);
@@ -553,7 +585,7 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
 
     const bool rec = playing && (recording.load()
                      || (hostDriving && (s.hostCapture == HostCapture::Always
-                                         || (s.hostCapture == HostCapture::WhenRecording && host.recording))));
+                                         || (s.hostCapture == HostCapture::WhenRecording && dawRecords))));
     // Closed window: the DAW's Play does not start MAIN (DAW notes still play the pads). An export keeps what was before it.
     if (!host.offline) windowLatched = windowOpen.load();
     const bool gated = hostDriving && s.mainNeedsWindow && !windowLatched;
@@ -591,14 +623,22 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
             }
         // pattern events (loop of loopTicks)
         const double L = (double) loopTicks;
-        const int64_t k0 = (int64_t) std::floor(startTick / L), k1 = (int64_t) std::floor((endTick - 1e-9) / L);
+        // no epsilon on the block end: a block ending a hair after a loop start (rounding of the running tick) has to
+        // look into the next loop, or that loop's first note is lost (t < endTick below keeps the block end exclusive)
+        const int64_t k0 = (int64_t) std::floor(startTick / L), k1 = (int64_t) std::floor(endTick / L);
         for (int64_t k = k0; patternAudible && k <= k1; ++k)
         {
             if (k < 0) continue; // count-in
             const double base = (double) k * L;
-            for (size_t ei = 0; ei < s.events.size(); ++ei)
+            // events are sorted by tick: start at the first one that can fall into this block (swing moves a note
+            // later by at most kPPQ / 6), stop after the block
+            const double from = startTick - base - (double) (kPPQ / 6) - 1.0, until = endTick - base;
+            const auto first = std::lower_bound(s.events.begin(), s.events.end(), from,
+                                                [](const EngineEvent& e, double t) { return (double) e.tick < t; });
+            for (size_t ei = (size_t) (first - s.events.begin()); ei < s.events.size(); ++ei)
             {
                 const auto& e = s.events[ei];
+                if ((double) e.tick >= until) break;
                 double t = base + (double) e.tick;
                 const int64_t inSixteenth = e.tick % (kPPQ / 2);
                 if (s.swing > 0.0f && std::abs(inSixteenth - kPPQ / 4) <= 8) t += s.swing * (kPPQ / 6.0); // off-beat 1/16 swing
@@ -626,9 +666,9 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         const bool counting = !hostDriving && startTick < 0.0;
         if ((s.metronome && !gated) || counting)
         {
-            const int64_t b0 = (int64_t) std::ceil(startTick / kPPQ), b1 = (int64_t) std::floor((endTick - 1e-9) / kPPQ);
+            const int64_t b0 = (int64_t) std::ceil(startTick / kPPQ), b1 = (int64_t) std::floor(endTick / kPPQ); // as above
             for (int64_t b = b0; b <= b1; ++b)
-                if (s.metronome || b < 0) addEv((int) (((double) b * kPPQ - startTick) / ticksPerSample), 2, (b % 4) == 0 ? 1 : 0, 0.0f, 0);
+                if ((double) b * kPPQ < endTick && (s.metronome || b < 0)) addEv((int) (((double) b * kPPQ - startTick) / ticksPerSample), 2, (b % 4) == 0 ? 1 : 0, 0.0f, 0);
         }
     }
 

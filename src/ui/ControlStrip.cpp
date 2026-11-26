@@ -144,6 +144,7 @@ ControlStrip::ControlStrip(HPSamplerProcessor& p) : proc(p)
     };
     addAndMakeVisible(recQ);
     swing.setSliderStyle(juce::Slider::LinearHorizontal);
+    wheelAfterClick(swing);
     swing.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
     swing.setRange(0.0, 1.0, 0.01);
     swing.setTooltip("Swing of the off-beat 1/16 in MAIN playback");
@@ -152,6 +153,7 @@ ControlStrip::ControlStrip(HPSamplerProcessor& p) : proc(p)
     swing.onValueChange = [this] { const float v = (float) swing.getValue(); proc.project.edit("Swing", [v](ProjectState& s) { s.settings.swing = v; }); };
     addAndMakeVisible(swing);
     master.setSliderStyle(juce::Slider::LinearHorizontal);
+    wheelAfterClick(master);
     master.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 56, 16);
     master.setRange(-36.0, 6.0, 0.1);
     master.setTextValueSuffix(" dB");
@@ -265,7 +267,8 @@ void ControlStrip::nowMenu()
     m.addItem(3, "Only DAW notes (MAIN is silent)", true, st.hostPlays == HostPlays::DawNotes);
     m.addItem(5, "MAIN follows the DAW only while this window is open", true, st.mainNeedsWindow);
     m.addSectionHeader("Write DAW notes and pads into MAIN");
-    m.addItem(11, "When the DAW records", true, st.hostCapture == HostCapture::WhenRecording);
+    m.addItem(11, proc.hostIsFL ? "When the DAW records (FL does not report it: while FL plays)" : "When the DAW records",
+              true, st.hostCapture == HostCapture::WhenRecording);
     m.addItem(12, "Always while the DAW plays", true, st.hostCapture == HostCapture::Always);
     m.addItem(10, "Only with REC / CAPTURE", true, st.hostCapture == HostCapture::Off);
     m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&now), [this](int r)

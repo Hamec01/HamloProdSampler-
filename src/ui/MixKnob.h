@@ -5,11 +5,11 @@
 namespace hps
 {
 // Small rotary knob used on the source lanes and on the pads: VOL / PAN / FILTER.
-// Vertical or horizontal drag, wheel, double-click = reset (a knob, never a pad: the pad never sees the click).
+// Vertical or horizontal drag, wheel after a click on it, double-click = reset (a knob, never a pad: the pad never sees the click).
 class MixKnob : public juce::Slider
 {
 public:
-    enum class Kind { Volume, Pan, Filter };
+    enum class Kind { Volume, Pan, Filter, LowCut, HighCut };
 
     explicit MixKnob(Kind k) : kind(k)
     {
@@ -19,15 +19,20 @@ public:
         setMouseDragSensitivity(140);
         setWantsKeyboardFocus(false);
         setPopupDisplayEnabled(true, true, nullptr, 900);
+        wheelAfterClick(*this);
         switch (kind)
         {
             case Kind::Volume: setRange(-36.0, 12.0, 0.1); setSkewFactorFromMidPoint(-6.0); setDoubleClickReturnValue(true, 0.0); getProperties().set("caption", "VOL"); break;
             case Kind::Pan:    setRange(-1.0, 1.0, 0.01); setDoubleClickReturnValue(true, 0.0); getProperties().set("caption", "PAN"); break;
             case Kind::Filter: setRange(-1.0, 1.0, 0.01); setDoubleClickReturnValue(true, 0.0); getProperties().set("caption", "FILTER"); break;
+            case Kind::LowCut: setRange(20.0, 2000.0, 1.0); setSkewFactorFromMidPoint(200.0); setDoubleClickReturnValue(true, 20.0); getProperties().set("caption", "LO CUT"); break;
+            case Kind::HighCut: setRange(500.0, 20000.0, 10.0); setSkewFactorFromMidPoint(4000.0); setDoubleClickReturnValue(true, 20000.0); getProperties().set("caption", "HI CUT"); break;
         }
-        getProperties().set("bipolar", kind != Kind::Volume);
+        getProperties().set("bipolar", kind == Kind::Pan || kind == Kind::Filter);
         setTooltip(kind == Kind::Volume ? "Volume (double-click: 0 dB)"
                  : kind == Kind::Pan ? "Pan (double-click: centre)"
+                 : kind == Kind::LowCut ? "Low cut: removes the lows below this frequency (double-click: off)"
+                 : kind == Kind::HighCut ? "High cut: removes the highs above this frequency (double-click: off)"
                  : "Filter: left = low-pass, right = high-pass (double-click: off)");
     }
 
@@ -52,6 +57,8 @@ public:
                 filterKnobToHz((float) v, hp, lp);
                 return v < 0 ? "LP " + juce::String(juce::roundToInt(lp)) + " Hz" : "HP " + juce::String(juce::roundToInt(hp)) + " Hz";
             }
+            case Kind::LowCut:  return v <= 25.0 ? juce::String("OFF") : juce::String(juce::roundToInt(v)) + " Hz";
+            case Kind::HighCut: return v >= 19000.0 ? juce::String("OFF") : v >= 1000.0 ? juce::String(v / 1000.0, 1) + " kHz" : juce::String(juce::roundToInt(v)) + " Hz";
         }
         return {};
     }

@@ -183,6 +183,32 @@ void testSequencerAndRecord()
     CHECK(seqRec == 0, "sequencer playback is not re-recorded (no feedback)");
 }
 
+// Every pattern note sounds exactly once per loop whatever the block size: the engine looks events up by tick,
+// swing moves off-beat 1/16 notes later (up to the next block), notes sit on the loop edges.
+void testPatternLookupAllBlockSizes()
+{
+    for (const float swing : { 0.0f, 1.0f })
+        for (const int n : { 16, 33, 64, 512 })
+        {
+            auto s = baseSnapshot();
+            s.bpm = 120.0;
+            s.loopTicks = kTicksPerBar;
+            s.swing = swing;
+            s.events.clear();
+            for (int64_t t = 0; t < kTicksPerBar; t += kPPQ / 4) s.events.push_back({ (int) ((t / (kPPQ / 4)) % 4), t, 60, 1.0f });
+            s.events.push_back({ 3, kTicksPerBar - 1, 60, 1.0f });
+            std::sort(s.events.begin(), s.events.end(), [](const auto& a, const auto& b) { return a.tick < b.tick; });
+            Rig r(s, 64);
+            r.e.setInternalPlaying(true, true);
+            const int loops = 3, frames = loops * 96000; // a bar at 120 BPM = 96000 samples
+            for (int done = 0; done < frames; done += n) r.block(std::min(n, frames - done));
+            uint32_t hits = 0;
+            for (int p = 0; p < 4; ++p) hits += r.e.padHits[(size_t) p].load();
+            CHECK(hits == (uint32_t) (loops * s.events.size()),
+                  "pattern notes once per loop, block " << n << " swing " << swing << ": " << hits << " of " << loops * s.events.size());
+        }
+}
+
 std::unique_ptr<PreviewSource> previewSound()
 {
     auto p = std::make_unique<PreviewSource>();
@@ -191,6 +217,24 @@ std::unique_ptr<PreviewSource> previewSound()
     p->audio = a;
     p->sampleRate = kSr;
     return p;
+}
+
+// Moving the edges of a playing audition does not start it over; the ruler seeks inside it.
+void testAuditionEdgesKeepPosition()
+{
+    Rig r(baseSnapshot());
+    r.e.publishPreviewSource(0, previewSound());
+    r.e.previewRange(0, 0, 96000, true);
+    for (int i = 0; i < 100; ++i) r.block(); // 25600 frames in
+    const double before = r.e.previewFrame.load();
+    r.e.previewUpdate(0, 1000, 80000, true); r.block();
+    CHECK(r.e.previewFrame.load() > before, "new edges around the playhead: it goes on (" << before << " -> " << r.e.previewFrame.load() << ")");
+    r.e.previewUpdate(0, 50000, 80000, true); r.block();
+    CHECK(r.e.previewFrame.load() >= 50000.0 && r.e.previewFrame.load() < 50000.0 + 512, "playhead outside the new edges: from the new start");
+    r.e.previewSeek(0, 70000); r.block();
+    CHECK(r.e.previewFrame.load() >= 70000.0 && r.e.previewFrame.load() < 70000.0 + 512, "seek jumps inside the loop");
+    r.e.previewSeek(0, 10); r.block();
+    CHECK(r.e.previewFrame.load() >= 50000.0 && r.e.previewFrame.load() < 50000.0 + 512, "seek outside the loop stays inside it");
 }
 
 // one thing at a time: pad / audition / MAIN / DAW
@@ -265,6 +309,13 @@ void testDawNotes()
     CHECK(play(HostPlays::DawNotes, false, false, rec, all) == 0, "DAW notes only: MAIN is silent");
     play(HostPlays::Both, true, true, rec, all);
     CHECK(rec == 1, "DAW record: the note is recorded");
+    // FL Studio never reports recording: "when the DAW records" records while it plays
+    s.hostHidesRecording = true;
+    play(HostPlays::Both, true, false, rec, all);
+    CHECK(rec == 1, "FL: a note played while FL plays is recorded");
+    s.hostCapture = HostCapture::Off;
+    play(HostPlays::Both, true, false, rec, all);
+    CHECK(rec == 0, "FL with capture Off: only remembered");
 }
 
 void testWindowClosed()
@@ -685,6 +736,27 @@ void testPersistenceAndBridge()
     CHECK(back.events.size() == 1 && back.events[0].rawTick == 470, "recorded raw timing restores");
     CHECK(back.settings.key.root == 2 && back.settings.mono == MonoMode::PerSource && back.sources[0].bpmOverride == 92.0, "settings restore");
 
+    // lane low / high cut: saved, and an old one-knob filter becomes the matching cut
+    {
+        ProjectState cut = pr.state();
+        cut.sources[0].lowCutHz = 150.0f; cut.sources[0].highCutHz = 6000.0f;
+        ProjectState b2;
+        CHECK(Serialization::fromJson(Serialization::toJson(cut), b2, err)
+              && std::abs(b2.sources[0].lowCutHz - 150.0f) < 0.01f && std::abs(b2.sources[0].highCutHz - 6000.0f) < 0.01f, "lane cuts restore");
+        auto old = juce::JSON::parse(Serialization::toJson(pr.state()));
+        if (auto* srcs = old["sources"].getArray())
+            if (auto* o = (*srcs)[0].getDynamicObject())
+            {
+                o->removeProperty("lowCutHz"); o->removeProperty("highCutHz");
+                o->setProperty("filter", -0.5f); // the old knob half way to low-pass
+            }
+        ProjectState b3;
+        float hp = 0, lp = 0;
+        filterKnobToHz(-0.5f, hp, lp);
+        CHECK(Serialization::fromJson(juce::JSON::toString(old), b3, err) && std::abs(b3.sources[0].highCutHz - lp) < 1.0f
+              && b3.sources[0].lowCutHz <= 20.5f, "old FILTER knob becomes the high cut");
+    }
+
     pr.undo();
     CHECK(!pr.state().pads[5].assigned, "undo reverts the edit");
     pr.redo();
@@ -817,7 +889,9 @@ int main(int argc, char** argv)
     testMidiTokens();
     testChokeAndMono();
     testSequencerAndRecord();
+    testPatternLookupAllBlockSizes();
     testTransportPriority();
+    testAuditionEdgesKeepPosition();
     testDawNotes();
     testWindowClosed();
     testAuditionMetroAndMarks();

@@ -397,7 +397,7 @@ void SourceLoader::load(int slot, const juce::File& file, const juce::String& id
         jobs.push_back({ slot, file, id });
     }
     busy = true;
-    if (!isThreadRunning()) startThread();
+    if (!isThreadRunning()) startThread(juce::Thread::Priority::low); // decoding / analysis never competes with the DAW
     notify();
 }
 

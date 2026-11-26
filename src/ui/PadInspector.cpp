@@ -18,6 +18,26 @@ PadInspector::PadInspector(HPSamplerProcessor& p) : proc(p)
         refresh();
         if (onScopeChanged) onScopeChanged();
     };
+    addChildComponent(clearBankBtn);
+    clearBankBtn.setWantsKeyboardFocus(false);
+    clearBankBtn.setColour(juce::TextButton::textColourOffId, theme::rec);
+    clearBankBtn.setTooltip("Remove the samples from every pad of this bank (and their notes in MAIN). Ctrl+Z brings them back.");
+    clearBankBtn.onClick = [this]
+    {
+        const int bank = proc.ui.editBank;
+        if (bank < 0) return;
+        const auto name = juce::String::charToString(juce::juce_wchar('A' + bank));
+        auto opts = juce::MessageBoxOptions::makeOptionsOkCancel(juce::MessageBoxIconType::WarningIcon, "Clear bank " + name,
+                                                                 "Remove the samples from all 16 pads of bank " + name
+                                                                 + " and their notes in MAIN?\n(Undo brings them back.)",
+                                                                 "Clear", "Cancel", this);
+        juce::AlertWindow::showAsync(opts, [this, bank, name, safe = juce::Component::SafePointer<PadInspector>(this)](int result)
+        {
+            if (result != 1 || safe == nullptr) return;
+            const int n = proc.clearBank(bank);
+            proc.setStatus(n > 0 ? "Bank " + name + " cleared: " + juce::String(n) + " pad(s) (Ctrl+Z = undo)" : "Bank " + name + " has no samples");
+        });
+    };
     addAndMakeVisible(viewport);
     viewport.setViewedComponent(&content, false);
     viewport.setScrollBarsShown(true, false);
@@ -176,6 +196,7 @@ juce::Slider& PadInspector::addSlider(const juce::String& section, const juce::S
                                       std::function<void(PadSettings&, float)> set, double skewMid)
 {
     auto* s = sliders.add(new juce::Slider());
+    wheelAfterClick(*s);
     s->setSliderStyle(juce::Slider::LinearHorizontal);
     s->setTextBoxStyle(juce::Slider::TextBoxRight, false, 70, 20);
     s->setRange(lo, hi, step);
@@ -263,6 +284,7 @@ void PadInspector::refresh()
     const auto& p = st.pads[(size_t) pad];
     for (auto* b : { &startM, &startP, &endM, &endP, &locateBtn }) b->setEnabled(!bank); // the range belongs to one pad
     scopeBtn.setButtonText(bank ? "ONE PAD" : "BANK " + juce::String::charToString(juce::juce_wchar('A' + pad / kPadsPerBank)));
+    if (clearBankBtn.isVisible() != bank) { clearBankBtn.setVisible(bank); resized(); }
     header.setText(bank ? "EDIT " + proc.editScopeName() : "PAD EDIT  " + padLabel(pad) + (p.assigned ? "  " + p.name : juce::String("  (empty)")), juce::dontSendNotification);
     header.setColour(juce::Label::textColourId, bank ? theme::accent : p.assigned ? st.sources[(size_t) p.src].colour : theme::textDim);
     for (auto& u : updaters) u();
@@ -326,6 +348,7 @@ void PadInspector::resized()
     auto top = r.removeFromTop(28);
     closeBtn.setBounds(top.removeFromRight(28).reduced(2));
     scopeBtn.setBounds(top.removeFromRight(78).reduced(2));
+    if (clearBankBtn.isVisible()) clearBankBtn.setBounds(top.removeFromRight(64).reduced(2));
     header.setBounds(top);
     viewport.setBounds(r);
     const int w = r.getWidth() - viewport.getScrollBarThickness() - 2;

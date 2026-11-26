@@ -41,7 +41,7 @@ private:
         return false;
     }
     static void markMixed(juce::Label& l, const juce::String& name, bool isMixed);
-    juce::TextButton scopeBtn;
+    juce::TextButton scopeBtn, clearBankBtn { "CLEAR" };
     juce::TextButton closeBtn { "X" }, locateBtn { "LOCATE IN SRC" }, playBtn { "PLAY" };
     juce::TextButton startM { "IN -" }, startP { "IN +" }, endM { "OUT -" }, endP { "OUT +" };
     juce::TextButton half { "1/2x" }, normal { "1x" }, dbl { "2x" };

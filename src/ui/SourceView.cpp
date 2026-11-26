@@ -511,6 +511,14 @@ void WaveCanvas::mouseDown(const juce::MouseEvent& e)
     {
         const auto gr = owner.grid();
         if (gr.valid() && std::abs(p.x - frameToX(gr.originFrame())) < 10) { drag = Drag::Origin; return; }
+        // a playing selection: the ruler rewinds inside it (drag = scrub); else play from here
+        const int64_t fr = (int64_t) xToFrame(p.x);
+        if (owner.auditioningHere() && v.selStart >= 0 && fr >= v.selStart && fr < v.selEnd)
+        {
+            drag = Drag::Seek;
+            owner.proc.engine.previewSeek(owner.getSlot(), fr);
+            return;
+        }
         owner.auditionFrom(snapped(xToFrame(p.x)));
         return;
     }
@@ -629,8 +637,15 @@ void WaveCanvas::mouseDrag(const juce::MouseEvent& e)
                 v.selStart = c.start; v.selEnd = c.end;
             }
             break;
+        case Drag::Seek:
+            owner.proc.engine.previewSeek(owner.getSlot(), (int64_t) f);
+            return;
         case Drag::None: return;
     }
+    // moving the edges of a playing audition: it follows at once and does not start over
+    if ((drag == Drag::SelStart || drag == Drag::SelEnd || drag == Drag::MoveSel || drag == Drag::CandStart || drag == Drag::CandEnd)
+        && owner.auditioningHere())
+        owner.auditionSelection(true);
     owner.selectionChanged();
     repaint();
 }
@@ -666,11 +681,11 @@ void WaveCanvas::mouseUp(const juce::MouseEvent& e)
             break;
         case Drag::SelStart: case Drag::SelEnd: case Drag::MoveSel:
             owner.commitPadEdit();
-            if (owner.proc.ui.autoAudition) owner.auditionSelection();
+            if (owner.proc.ui.autoAudition || owner.auditioningHere()) owner.auditionSelection(true);
             break;
         case Drag::CandStart: case Drag::CandEnd:
             owner.candidatesEdited();
-            if (owner.proc.ui.autoAudition) owner.auditionSelection();
+            if (owner.proc.ui.autoAudition || owner.auditioningHere()) owner.auditionSelection(true);
             break;
         case Drag::ToPad:
             if (!moved && owner.proc.ui.chopLength == LengthMode::ToEnd && owner.editingPad() < 0 && v.selEnd >= d->numFrames
@@ -822,6 +837,7 @@ SourceView::SourceView(HPSamplerProcessor& p) : proc(p)
     addAndMakeVisible(focusBox);
     addAndMakeVisible(amount);
     amount.setSliderStyle(juce::Slider::LinearHorizontal);
+    wheelAfterClick(amount);
     amount.setTextBoxStyle(juce::Slider::TextBoxRight, false, 40, 20);
     toolBox.onChange = [this] { updateHeader(); chopParamChanged(); };
     focusBox.onChange = [this] { chopParamChanged(); };
@@ -1242,11 +1258,17 @@ void SourceView::timerCallback()
     if (wasLoading[(size_t) slot] != proc.isSourceLoading(slot)) { wasLoading[(size_t) slot] = proc.isSourceLoading(slot); refresh(); }
 }
 
-void SourceView::auditionSelection()
+bool SourceView::auditioningHere() const
+{
+    return proc.engine.previewFrame.load() >= 0.0 && proc.engine.previewSlot.load() == slot;
+}
+
+void SourceView::auditionSelection(bool keepPosition)
 {
     const auto& v = view();
     if (v.selStart < 0 || v.selEnd <= v.selStart) return;
-    proc.engine.previewRange(slot, v.selStart, v.selEnd, proc.ui.loopAudition);
+    if (keepPosition && auditioningHere()) proc.engine.previewUpdate(slot, v.selStart, v.selEnd, proc.ui.loopAudition);
+    else proc.engine.previewRange(slot, v.selStart, v.selEnd, proc.ui.loopAudition);
 }
 
 void SourceView::auditionFrom(int64_t frame)
@@ -1309,7 +1331,8 @@ void SourceView::nudge(bool end, int64_t ms)
     selectionChanged();
     commitPadEdit();
     canvas.repaint();
-    // listen around the edge that moved
+    // a looping audition goes on with the new edges; else listen around the edge that moved
+    if (auditioningHere() && proc.ui.loopAudition) { auditionSelection(true); return; }
     if (end) proc.engine.previewRange(slot, std::max<int64_t>(v.selStart, v.selEnd - (int64_t) (0.4 * d->sampleRate)), v.selEnd, false);
     else proc.engine.previewRange(slot, v.selStart, std::min<int64_t>(v.selEnd, v.selStart + (int64_t) (0.4 * d->sampleRate)), false);
 }

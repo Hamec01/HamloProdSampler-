@@ -25,7 +25,7 @@ public:
     double xToFrame(double x) const;
 
 private:
-    enum class Drag { None, NewSel, SelStart, SelEnd, MoveSel, ToPad, Origin, CandStart, CandEnd, Overview };
+    enum class Drag { None, NewSel, SelStart, SelEnd, MoveSel, ToPad, Origin, CandStart, CandEnd, Overview, Seek };
     juce::Rectangle<int> rulerArea() const;
     juce::Rectangle<int> padBand() const;
     juce::Rectangle<int> waveArea() const;
@@ -70,7 +70,8 @@ public:
     UiState::SrcView& view() { return proc.ui.src[(size_t) slot]; }
     std::shared_ptr<const SourceData> data() const { return proc.project.sourceDataForSlot(slot); }
     SourceGrid grid() const { return proc.gridForSource(slot); }
-    void auditionSelection();
+    void auditionSelection(bool keepPosition = false); // keepPosition: a playing audition goes on (edges moved)
+    bool auditioningHere() const;
     void auditionFrom(int64_t frame);
     void stopAudition();
     void quickAssign();

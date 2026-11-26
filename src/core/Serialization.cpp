@@ -92,7 +92,8 @@ juce::String Serialization::toJson(const ProjectState& s)
         o->setProperty("keyOverrideMode", src.keyOverrideMode);
         o->setProperty("gainDb", src.gainDb);
         o->setProperty("pan", src.pan);
-        o->setProperty("filter", src.filter);
+        o->setProperty("lowCutHz", src.lowCutHz);
+        o->setProperty("highCutHz", src.highCutHz);
         sources.add(juce::var(o));
     }
     root->setProperty("sources", sources);
@@ -193,7 +194,11 @@ bool Serialization::fromJson(const juce::String& json, ProjectState& out, juce::
             src.keyOverrideMode = juce::jlimit(0, 1, get(o, "keyOverrideMode", 0));
             src.gainDb = juce::jlimit(-60.0f, 12.0f, get(o, "gainDb", 0.0f));
             src.pan = juce::jlimit(-1.0f, 1.0f, get(o, "pan", 0.0f));
-            src.filter = juce::jlimit(-1.0f, 1.0f, get(o, "filter", 0.0f));
+            // projects before the two cut knobs had one bipolar filter knob: it becomes the matching cut
+            float hp = 20.0f, lp = 20000.0f;
+            filterKnobToHz(juce::jlimit(-1.0f, 1.0f, get(o, "filter", 0.0f)), hp, lp);
+            src.lowCutHz = juce::jlimit(20.0f, 2000.0f, get(o, "lowCutHz", hp));
+            src.highCutHz = juce::jlimit(500.0f, 20000.0f, get(o, "highCutHz", lp));
         }
     if (auto* arr = v["slices"].getArray())
         for (const auto& o : *arr)

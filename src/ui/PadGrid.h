@@ -28,6 +28,7 @@ public:
     float flash = 0.0f;
     uint32_t lastHits = 0;
     bool wasRendering = false;
+    bool wasSounding = false;
 
 private:
     PadGrid& grid;
