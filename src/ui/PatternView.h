@@ -40,7 +40,7 @@ public:
     void mouseMove(const juce::MouseEvent&) override;
     void mouseMagnify(const juce::MouseEvent& e, float f) override { zoomTime(f, e.x); }
     void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
-    void mouseDoubleClick(const juce::MouseEvent&) override {}
+    void mouseDoubleClick(const juce::MouseEvent&) override; // a lane's name: open that source
     bool isInterestedInDragSource(const SourceDetails& d) override { return d.description.toString().startsWith("pad:"); }
     void itemDragMove(const SourceDetails& d) override { dropX = d.localPosition.x; repaint(); }
     void itemDragExit(const SourceDetails&) override { dropX = -1; repaint(); }
@@ -48,7 +48,7 @@ public:
     bool isInterestedInFileDrag(const juce::StringArray&) override { return true; }
     void filesDropped(const juce::StringArray& files, int x, int y) override;
 
-    static constexpr int kLabelW = 150, kNavH = 14, kRulerH = 40, kGuideH = 16, kVelH = 58;
+    static constexpr int kLabelW = 210, kNavH = 14, kRulerH = 40, kGuideH = 16, kVelH = 58;
     struct Row { int src; int pad; int y, h; };   // pad -1 = whole source lane / a source without pads
     std::vector<Row> rows() const;
     juce::Rectangle<int> notesArea() const;       // rows only (no overview / ruler / guide / velocity)
@@ -71,7 +71,11 @@ public:
     float lastPlayheadX = -100.0f;
     bool isDragging() const { return drag != Drag::None; }
 
-    int64_t cursorTick = 0;                  // paste position (last click)
+    // a lane's name: [WAV] drags the lane alone into the DAW (click = save as), [save] = save as
+    juce::Rectangle<int> laneIcon(const Row& r, int which) const;
+    bool laneHasNotes(int src) const;
+    int labelSrc = -1, labelIcon = -1;
+    bool labelDragged = false;
 
 private:
     struct Placed { int index; juce::Rectangle<float> trig, tail; };
@@ -113,6 +117,7 @@ private:
 class PatternView : public juce::Component, private juce::Timer
 {
 public:
+    friend class LaneCanvas; // lane icons: per-lane WAV drag / export
     explicit PatternView(HPSamplerProcessor& p);
     ~PatternView() override;
     void refresh();
@@ -181,6 +186,8 @@ private:
     };
     static void startFileDrag(juce::Component& from, const std::function<juce::File()>& makeFile);
     juce::File dragFile(bool midi);
+    juce::File laneDragFile(int src);   // one source lane as a WAV loop
+    void exportLaneWav(int src);
     bool resultDragged = false;
     DragFileButton wavBtn { "DRAG WAV" }, midiBtn { "DRAG MIDI" };
     juce::TextButton renderBtn { "RENDER" };

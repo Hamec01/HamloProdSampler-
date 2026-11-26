@@ -493,6 +493,36 @@ void LaneCanvas::paint(juce::Graphics& g)
                 g.setColour(s.colour);
                 g.setFont(theme::mono(12.0f, true));
                 g.drawText("SRC " + juce::String(row.src + 1) + (padRows ? "  no pads" : ""), txt.removeFromTop(14), juce::Justification::topLeft);
+                if (laneHasNotes(row.src))
+                    for (int which = 0; which < 2; ++which)
+                    {
+                        const auto ic = laneIcon(row, which).toFloat();
+                        const bool hot = labelSrc == row.src && labelIcon == which;
+                        g.setColour(hot ? s.colour.withAlpha(0.45f) : theme::screen.withAlpha(0.7f));
+                        g.fillRoundedRectangle(ic, 3.0f);
+                        g.setColour(s.colour.withAlpha(0.9f));
+                        g.drawRoundedRectangle(ic.reduced(0.5f), 3.0f, 1.0f);
+                        const auto in = ic.reduced(5.0f, 3.5f);
+                        if (which == 0) // a small waveform: drag the lane as WAV
+                        {
+                            static constexpr float h[] = { 0.3f, 0.8f, 0.5f, 1.0f, 0.6f, 0.9f, 0.35f, 0.7f, 0.25f };
+                            const int n = (int) (sizeof(h) / sizeof(h[0]));
+                            for (int k = 0; k < n; ++k)
+                            {
+                                const float x = in.getX() + in.getWidth() * (k + 0.5f) / (float) n, a = in.getHeight() * 0.5f * h[k];
+                                g.drawLine(x, in.getCentreY() - a, x, in.getCentreY() + a, 1.2f);
+                            }
+                        }
+                        else // save: an arrow into a tray
+                        {
+                            const float cx = in.getCentreX();
+                            g.drawLine(cx, in.getY(), cx, in.getBottom() - 3.0f, 1.4f);
+                            juce::Path arrow;
+                            arrow.addTriangle(cx - 3.5f, in.getBottom() - 5.5f, cx + 3.5f, in.getBottom() - 5.5f, cx, in.getBottom() - 1.5f);
+                            g.fillPath(arrow);
+                            g.drawLine(in.getX() + 1.0f, in.getBottom(), in.getRight() - 1.0f, in.getBottom(), 1.4f);
+                        }
+                    }
                 g.setFont(theme::ui(11.0f));
                 g.setColour(s.empty() ? theme::textDim : theme::text);
                 if (!padRows)
@@ -566,7 +596,7 @@ void LaneCanvas::paint(juce::Graphics& g)
             if (bar) { g.setFont(theme::mono(11.0f, true)); g.drawText(juce::String(t / kTicksPerBar + 1), (int) x + 3, kNavH + 2, 30, 14, juce::Justification::centredLeft); }
             else if (pxPerTick * kPPQ > 26) { g.setFont(theme::mono(9.5f)); g.drawText(juce::String((t % kTicksPerBar) / kPPQ + 1), (int) x + 2, kNavH + 12, 20, 12, juce::Justification::centredLeft); }
         }
-        const float cx = (float) tickToX((double) cursorTick);
+        const float cx = (float) tickToX((double) owner.proc.ui.mainCursorTick);
         juce::Path p;
         p.addTriangle(cx - 5, (float) kRulerH - 8, cx + 5, (float) kRulerH - 8, cx, (float) kRulerH);
         g.setColour(theme::accent.withAlpha(0.85f));
@@ -715,6 +745,30 @@ void LaneCanvas::addNote(int pad, int64_t tick, int64_t length)
 }
 
 // Paint: notes of the current length one after another; Step paint: one per grid step (or erases them)
+juce::Rectangle<int> LaneCanvas::laneIcon(const Row& r, int which) const
+{
+    return { kLabelW - 6 - 28 * (2 - which), r.y + 5, 25, 17 };
+}
+
+bool LaneCanvas::laneHasNotes(int src) const
+{
+    const auto& st = owner.proc.project.state();
+    for (const auto& e : st.events)
+        if (e.pad >= 0 && e.pad < kNumPads && st.pads[(size_t) e.pad].src == src) return true;
+    return false;
+}
+
+void LaneCanvas::mouseDoubleClick(const juce::MouseEvent& e)
+{
+    if (e.x >= kLabelW || e.y < kRulerH) return;
+    const auto rs = rows();
+    const Row* row = rowAt(rs, e.y);
+    if (row == nullptr || row->pad >= 0) return;
+    for (int which = 0; which < 2; ++which)
+        if (laneHasNotes(row->src) && laneIcon(*row, which).contains(e.getPosition())) return;
+    if (owner.onShowSource) owner.onShowSource(row->src);
+}
+
 void LaneCanvas::paintNotesTo(int x)
 {
     const int64_t loop = owner.loopTicks(), g = owner.gridStep();
@@ -793,7 +847,7 @@ void LaneCanvas::mouseDown(const juce::MouseEvent& e)
     if (e.y < kNavH) { if (e.x >= kLabelW) { drag = Drag::Nav; dragNav(e.x); } return; }
     if (e.y < kRulerH) // ruler: paste position
     {
-        if (e.x >= kLabelW) cursorTick = juce::jlimit<int64_t>(0, owner.loopTicks() - 1, snapTick(xToTick(e.x), true));
+        if (e.x >= kLabelW) owner.proc.ui.mainCursorTick = juce::jlimit<int64_t>(0, owner.loopTicks() - 1, snapTick(xToTick(e.x), true));
         repaint();
         return;
     }
@@ -816,11 +870,21 @@ void LaneCanvas::mouseDown(const juce::MouseEvent& e)
             audition(row->pad);
             owner.refresh();
         }
-        else if (owner.onShowSource) owner.onShowSource(row->src);
+        else if (laneHasNotes(row->src))
+        {
+            for (int which = 0; which < 2; ++which)
+                if (laneIcon(*row, which).contains(e.getPosition()))
+                {
+                    labelSrc = row->src; labelIcon = which; labelDragged = false;
+                    repaint(0, row->y, kLabelW, row->h);
+                    return;
+                }
+        }
+        // a click on the name stays in MAIN (maintainer 2026-11-26); a double-click opens the source
         return;
     }
     const double mouseTick = xToTick(e.x);
-    cursorTick = juce::jlimit<int64_t>(0, owner.loopTicks() - 1, snapTick(mouseTick, true));
+    owner.proc.ui.mainCursorTick = juce::jlimit<int64_t>(0, owner.loopTicks() - 1, snapTick(mouseTick, true));
     bool edge = false;
     const int evIndex = eventAt(e.getPosition(), edge);
 
@@ -863,7 +927,7 @@ void LaneCanvas::mouseDown(const juce::MouseEvent& e)
     {
         if (owner.proc.engine.hostDriven.load()) { owner.proc.setStatus("The DAW is playing and leads MAIN - stop it in the DAW"); return; }
         drag = Drag::Playback;
-        owner.proc.playMain(cursorTick);
+        owner.proc.playMain(owner.proc.ui.mainCursorTick);
         return;
     }
 
@@ -957,6 +1021,16 @@ void LaneCanvas::mouseDown(const juce::MouseEvent& e)
 
 void LaneCanvas::mouseDrag(const juce::MouseEvent& e)
 {
+    if (labelIcon >= 0) // a lane's WAV / save icon: dragging takes the lane into the DAW
+    {
+        if (!labelDragged && e.getDistanceFromDragStart() > 6)
+        {
+            labelDragged = true;
+            const int src = labelSrc;
+            PatternView::startFileDrag(*this, [this, src] { return owner.laneDragFile(src); });
+        }
+        return;
+    }
     auto& project = owner.proc.project;
     auto& ui = owner.proc.ui;
     const int64_t loop = owner.loopTicks();
@@ -1067,6 +1141,16 @@ void LaneCanvas::mouseDrag(const juce::MouseEvent& e)
 
 void LaneCanvas::mouseUp(const juce::MouseEvent& e)
 {
+    if (labelIcon >= 0)
+    {
+        const int src = labelSrc;
+        const bool dragged = labelDragged;
+        labelSrc = labelIcon = -1;
+        labelDragged = false;
+        repaint(0, 0, kLabelW, getHeight());
+        if (!dragged) owner.exportLaneWav(src); // a click: save as
+        return;
+    }
     auto& project = owner.proc.project;
     const auto was = drag;
     drag = Drag::None;
@@ -1401,7 +1485,7 @@ void PatternView::paste()
     if (clipboard.empty()) return;
     int64_t lo = INT64_MAX;
     for (const auto& e : clipboard) lo = std::min(lo, e.tick);
-    const int64_t at = lanes.cursorTick, loop = loopTicks();
+    const int64_t at = proc.ui.mainCursorTick, loop = loopTicks();
     std::vector<juce::String> fresh;
     proc.project.edit("Paste notes", [&](ProjectState& s)
     {
@@ -1696,6 +1780,29 @@ void PatternView::resized()
     zoomLabel.setBounds(bar.removeFromRight(50));
     lanes.setBounds(r.withTrimmedTop(2));
     lanes.clampView();
+}
+
+juce::File PatternView::laneDragFile(int src)
+{
+    juce::String err;
+    const auto f = proc.writeDragFile(false, err, src);
+    proc.setStatus(f == juce::File() ? err : "Drop it into the DAW: " + f.getFileName());
+    return f;
+}
+
+void PatternView::exportLaneWav(int src)
+{
+    const auto name = "HPSAMPLER_SRC" + juce::String(src + 1) + ".wav";
+    chooser = std::make_unique<juce::FileChooser>("Export SRC " + juce::String(src + 1) + " of MAIN as WAV",
+                                                  juce::File::getSpecialLocation(juce::File::userMusicDirectory).getChildFile(name), "*.wav");
+    chooser->launchAsync(juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting, [this, src](const juce::FileChooser& fc)
+    {
+        auto f = fc.getResult();
+        if (f == juce::File()) return;
+        if (!f.hasFileExtension("wav")) f = f.withFileExtension("wav");
+        juce::String err;
+        proc.setStatus(proc.exportWav(f, err, 2.0, src) ? "Exported " + f.getFullPathName() : "Export failed: " + err);
+    });
 }
 
 juce::File PatternView::dragFile(bool midi)

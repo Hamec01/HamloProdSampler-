@@ -156,7 +156,7 @@ public:
     void previewSeek(int slot, int64_t frame); // jump inside a playing audition (ignored when none plays)
     void setInternalPlaying(bool shouldPlay, bool fromStart = false);
     void playFrom(int64_t loopTick); // internal transport from a position (Playback tool)
-    void playWithCountIn();          // one bar of clicks (1-2-3-4), then MAIN from bar 1
+    void playWithCountIn(int64_t loopTick = 0); // one bar of clicks, then MAIN from loopTick          // one bar of clicks (1-2-3-4), then MAIN from bar 1
     void stopAll();                  // audition + live pads + MAIN; what the DAW plays goes on
     void setRecording(bool shouldRecord) { recording.store(shouldRecord); }
     void panic();
@@ -261,6 +261,7 @@ private:
     // transport
     bool internalPlaying = false;
     double internalTick = 0.0;    // absolute ticks
+    double countInEnd = 0.0;      // internal play: the count-in bar ends here (the position PLAY started from)
     double blockStartTick = 0.0;  // absolute ticks at block start
     double ticksPerSample = 0.0;
     bool wasPlaying = false;

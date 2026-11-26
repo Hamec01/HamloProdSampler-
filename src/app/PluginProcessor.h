@@ -53,6 +53,9 @@ struct UiState
     double mainVZoom = 1.0;
     int mainScrollY = 0;
     bool showGuide = true;
+    int64_t mainCursorTick = 0;         // MAIN's marker (last click in the ruler / notes): PLAY starts here
+    enum class AutoPlay { Off, Whole, Edge };
+    AutoPlay autoPlay = AutoPlay::Whole; // SRC: what plays after the selection changed (Edge: 2 s at the moved edge)
 };
 
 class HPSamplerProcessor : public juce::AudioProcessor, private juce::Timer
@@ -128,7 +131,7 @@ public:
     void stop();
     // Space: whatever the plug-in itself sounds (audition, hand-played pads, MAIN) stops; returns false when nothing did
     bool stopEverything();
-    void playMain(int64_t fromTick = 0);
+    void playMain(int64_t fromTick = -1); // -1 = from MAIN's marker; with REC armed and 1-2-3-4 on, a count-in first
     // DAW -> MAIN: notes of the last take (played while a transport ran) that MAIN does not have yet
     int  captureCount() const;
     void captureTake();
@@ -142,10 +145,10 @@ public:
     void useSourceAsAnchor(int slot);
 
     // export
-    bool exportWav(const juce::File& f, juce::String& error, double tailSeconds = 2.0);
+    bool exportWav(const juce::File& f, juce::String& error, double tailSeconds = 2.0, int onlySource = -1); // onlySource: one MAIN lane
     bool exportMidi(const juce::File& f, juce::String& error);
     // A file to drop into the DAW. It stays on disk (Documents/HamloProd/HPSAMPLER/Drag): the DAW project refers to it.
-    juce::File writeDragFile(bool midi, juce::String& error);
+    juce::File writeDragFile(bool midi, juce::String& error, int onlySource = -1);
     void renderResult(); // RESULT view (offline, message thread is fine for short loops)
     std::shared_ptr<juce::AudioBuffer<float>> resultAudio;
     uint64_t resultRevision = 0;

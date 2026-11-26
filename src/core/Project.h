@@ -112,7 +112,7 @@ struct ProjectSettings
     bool       countIn = true;      // 1-2-3-4 before recording
     HostPlays  hostPlays = HostPlays::Both;
     bool       mainNeedsWindow = true; // the DAW's Play starts MAIN only while the plug-in window is open
-    HostCapture hostCapture = HostCapture::WhenRecording;
+    HostCapture hostCapture = HostCapture::Off; // DAW Play records only with REC lit (maintainer 2026-11-26)
 };
 
 struct ProjectState

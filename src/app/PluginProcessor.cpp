@@ -599,7 +599,11 @@ void HPSamplerProcessor::togglePlay()
 void HPSamplerProcessor::playMain(int64_t fromTick)
 {
     if (engine.hostDriven.load()) { setStatus("The DAW is playing and leads MAIN - start / stop it in the DAW"); return; }
-    engine.playFrom(fromTick);
+    const int64_t loop = std::max<int64_t>(1, (int64_t) project.state().settings.patternBars * kTicksPerBar);
+    const int64_t from = juce::jlimit<int64_t>(0, loop - 1, fromTick >= 0 ? fromTick : ui.mainCursorTick);
+    // REC lit: PLAY starts the pass (1-2-3-4 counts a bar in first); REC off: it only plays
+    if (recordArmed && project.state().settings.countIn) engine.playWithCountIn(from);
+    else engine.playFrom(from);
 }
 
 void HPSamplerProcessor::stop()
@@ -633,7 +637,7 @@ HPSamplerProcessor::NowPlaying HPSamplerProcessor::nowPlaying() const
     if (daw)
     {
         n.who = Who::Daw;
-        n.title = (engine.hostRecording.load() ? "DAW REC " : "DAW ") + pos;
+        n.title = (engine.hostRecording.load() || recordArmed ? "DAW REC " : "DAW ") + pos;
         const auto hp = project.state().settings.hostPlays;
         n.detail = hand.isNotEmpty() ? "+ " + hand : hp == HostPlays::Main ? "MAIN only" : hp == HostPlays::DawNotes ? "DAW notes only" : "MAIN + DAW notes";
     }
@@ -655,12 +659,10 @@ void HPSamplerProcessor::setRecordArmed(bool armed)
         project.beginGesture("Record pass");
         pendingRec.clear();
         dawGesture = false;
-        if (!engine.transportPlaying.load())
-        {
-            if (project.state().settings.countIn) engine.playWithCountIn();
-            else engine.playFrom(0);
-        }
-        setStatus("REC: play pads / MIDI - hits are written to the 4 source lanes (overdub)");
+        // REC only arms: PLAY (or the DAW's Play) starts the pass; while MAIN already plays it records from now
+        setStatus(engine.transportPlaying.load() ? juce::String("REC: play pads / MIDI - hits are written to the 4 source lanes (overdub)")
+                                                 : juce::String("REC armed: press PLAY") + (project.state().settings.countIn ? " (1-2-3-4 counts in)" : "")
+                                                       + " - pads / MIDI are written to the 4 source lanes");
     }
     else
     {
@@ -879,7 +881,7 @@ void HPSamplerProcessor::useSourceAsAnchor(int slot)
 // --------------------------------------------------------------------------------------------
 // export / result
 
-bool HPSamplerProcessor::exportWav(const juce::File& f, juce::String& error, double tailSeconds)
+bool HPSamplerProcessor::exportWav(const juce::File& f, juce::String& error, double tailSeconds, int onlySource)
 {
     renderer.finish(30000);
     std::array<const PadSound*, kNumPads> sounds {};
@@ -888,6 +890,16 @@ bool HPSamplerProcessor::exportWav(const juce::File& f, juce::String& error, dou
     auto snap = buildSnapshot();
     snap->metronome = false; // never in a file
     Engine::renderOffline(*snap, sounds, engineRate, out, tailSeconds);
+    if (onlySource >= 0) // one MAIN lane: the notes of that source's pads (its mix stays: volume, pan, filters)
+    {
+        const auto& st = project.state();
+        auto& ev = snap->events;
+        ev.erase(std::remove_if(ev.begin(), ev.end(), [&](const EngineEvent& e)
+        {
+            return e.pad < 0 || e.pad >= kNumPads || st.pads[(size_t) e.pad].src != onlySource;
+        }), ev.end());
+        if (ev.empty()) { error = "SRC " + juce::String(onlySource + 1) + " has no notes in MAIN"; return false; }
+    }
     f.deleteFile();
     std::unique_ptr<juce::FileOutputStream> stream(f.createOutputStream());
     if (stream == nullptr) { error = "Cannot write " + f.getFullPathName(); return false; }
@@ -909,17 +921,17 @@ bool HPSamplerProcessor::exportMidi(const juce::File& f, juce::String& error)
     return true;
 }
 
-juce::File HPSamplerProcessor::writeDragFile(bool midi, juce::String& error)
+juce::File HPSamplerProcessor::writeDragFile(bool midi, juce::String& error, int onlySource)
 {
     const auto& st = project.state();
     if (st.events.empty()) { error = "MAIN is empty: nothing to drag"; return {}; }
     const auto dir = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("HamloProd/HPSAMPLER/Drag");
     if (!dir.createDirectory()) { error = "Cannot create " + dir.getFullPathName(); return {}; }
-    juce::String name = "HPSAMPLER " + juce::String(st.settings.bpm, std::abs(st.settings.bpm - std::round(st.settings.bpm)) < 0.05 ? 0 : 1) + " BPM";
+    juce::String name = (onlySource >= 0 ? "HPSAMPLER SRC " + juce::String(onlySource + 1) + " " : juce::String("HPSAMPLER ")) + juce::String(st.settings.bpm, std::abs(st.settings.bpm - std::round(st.settings.bpm)) < 0.05 ? 0 : 1) + " BPM";
     if (st.settings.key.known()) name << " " << st.settings.key.label();
     name << " " << juce::Time::getCurrentTime().formatted("%y%m%d-%H%M%S");
     const auto f = dir.getNonexistentChildFile(juce::File::createLegalFileName(name), midi ? ".mid" : ".wav", false);
-    const bool ok = midi ? exportMidi(f, error) : exportWav(f, error, 0.0); // exactly the loop: it repeats cleanly in the playlist
+    const bool ok = midi ? exportMidi(f, error) : exportWav(f, error, 0.0, onlySource); // exactly the loop: it repeats cleanly in the playlist
     return ok ? f : juce::File();
 }
 

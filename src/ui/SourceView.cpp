@@ -676,16 +676,16 @@ void WaveCanvas::mouseUp(const juce::MouseEvent& e)
             else
             {
                 if (owner.editingPad() >= 0) { owner.proc.ui.editingPad = -1; owner.refresh(); } // a new region leaves pad edit
-                if (owner.proc.ui.autoAudition) owner.auditionSelection();
+                owner.auditionAfterEdit(-1);
             }
             break;
         case Drag::SelStart: case Drag::SelEnd: case Drag::MoveSel:
             owner.commitPadEdit();
-            if (owner.proc.ui.autoAudition || owner.auditioningHere()) owner.auditionSelection(true);
+            owner.auditionAfterEdit(was == Drag::SelStart ? 0 : was == Drag::SelEnd ? 1 : -1);
             break;
         case Drag::CandStart: case Drag::CandEnd:
             owner.candidatesEdited();
-            if (owner.proc.ui.autoAudition || owner.auditioningHere()) owner.auditionSelection(true);
+            owner.auditionAfterEdit(was == Drag::CandStart ? 0 : 1);
             break;
         case Drag::ToPad:
             if (!moved && owner.proc.ui.chopLength == LengthMode::ToEnd && owner.editingPad() < 0 && v.selEnd >= d->numFrames
@@ -933,9 +933,16 @@ SourceView::SourceView(HPSamplerProcessor& p) : proc(p)
     loopBtn.setClickingTogglesState(true);
     loopBtn.setTooltip("Loop the selection while listening");
     loopBtn.onClick = [this] { proc.ui.loopAudition = loopBtn.getToggleState(); if (proc.engine.previewFrame.load() >= 0) auditionSelection(); };
-    autoBtn.setClickingTogglesState(true);
-    autoBtn.setTooltip("Play the selection automatically whenever you change it");
-    autoBtn.onClick = [this] { proc.ui.autoAudition = autoBtn.getToggleState(); };
+    autoBtn.setTooltip("What plays after you change the selection (click to switch):\n"
+                       "AUTO ALL - the whole selection\n"
+                       "AUTO EDGE - 2 s at the edge you moved (long selections: no need to hear all of it again)\n"
+                       "AUTO OFF - nothing (Space / click inside the selection plays it)");
+    autoBtn.onClick = [this]
+    {
+        using A = UiState::AutoPlay;
+        proc.ui.autoPlay = proc.ui.autoPlay == A::Whole ? A::Edge : proc.ui.autoPlay == A::Edge ? A::Off : A::Whole;
+        refreshAutoButton();
+    };
     assignBtn.setTooltip("Put the selection on the next free pad of the current bank");
     assignBtn.onClick = [this] { quickAssign(); };
     assignModeBtn.setTooltip("Then click the pad that should get the selection (no sound)");
@@ -1154,7 +1161,7 @@ void SourceView::updateHeader()
     snapBox.setSelectedId(proc.ui.snap == SnapMode::Transient ? 1 : proc.ui.snap == SnapMode::Grid ? 2 : proc.ui.snap == SnapMode::ZeroCross ? 3 : 4,
                           juce::dontSendNotification);
     loopBtn.setToggleState(proc.ui.loopAudition, juce::dontSendNotification);
-    autoBtn.setToggleState(proc.ui.autoAudition, juce::dontSendNotification);
+    refreshAutoButton();
     resized();
 }
 
@@ -1244,7 +1251,7 @@ void SourceView::resized()
     zoomSelBtn.setBounds(sel.removeFromLeft(76).reduced(2));
     zoomAllBtn.setBounds(sel.removeFromLeft(40).reduced(2));
     loopBtn.setBounds(sel.removeFromLeft(52).reduced(2));
-    autoBtn.setBounds(sel.removeFromLeft(84).reduced(2));
+    autoBtn.setBounds(sel.removeFromLeft(92).reduced(2));
 }
 
 void SourceView::timerCallback()
@@ -1269,6 +1276,28 @@ void SourceView::auditionSelection(bool keepPosition)
     if (v.selStart < 0 || v.selEnd <= v.selStart) return;
     if (keepPosition && auditioningHere()) proc.engine.previewUpdate(slot, v.selStart, v.selEnd, proc.ui.loopAudition);
     else proc.engine.previewRange(slot, v.selStart, v.selEnd, proc.ui.loopAudition);
+}
+
+void SourceView::refreshAutoButton()
+{
+    using A = UiState::AutoPlay;
+    proc.ui.autoAudition = proc.ui.autoPlay != A::Off; // the older switch some paths still read
+    autoBtn.setButtonText(proc.ui.autoPlay == A::Whole ? "AUTO ALL" : proc.ui.autoPlay == A::Edge ? "AUTO EDGE" : "AUTO OFF");
+    autoBtn.setToggleState(proc.ui.autoPlay != A::Off, juce::dontSendNotification);
+}
+
+void SourceView::auditionAfterEdit(int edge)
+{
+    const auto& v = view();
+    const auto d = data();
+    if (d == nullptr || v.selStart < 0 || v.selEnd <= v.selStart) return;
+    if (auditioningHere()) { auditionSelection(true); return; } // it plays: it goes on with the new edges
+    using A = UiState::AutoPlay;
+    if (proc.ui.autoPlay == A::Off) return;
+    const int64_t around = (int64_t) (2.0 * d->sampleRate);
+    if (proc.ui.autoPlay == A::Whole || v.selEnd - v.selStart <= 2 * around) { auditionSelection(); return; }
+    if (edge == 0) proc.engine.previewRange(slot, v.selStart, v.selStart + around, false);
+    else proc.engine.previewRange(slot, v.selEnd - around, v.selEnd, false); // the end (also a new / moved region)
 }
 
 void SourceView::auditionFrom(int64_t frame)

@@ -166,7 +166,7 @@ juce::String Serialization::toJson(const ProjectState& s)
     so->setProperty("countIn", st.countIn);
     so->setProperty("mainNeedsWindow", st.mainNeedsWindow);
     so->setProperty("hostPlays", (int) st.hostPlays);
-    so->setProperty("hostCapture", (int) st.hostCapture);
+    so->setProperty("hostCapture2", (int) st.hostCapture);
     root->setProperty("settings", juce::var(so));
 
     return juce::JSON::toString(juce::var(root), false);
@@ -263,7 +263,8 @@ bool Serialization::fromJson(const juce::String& json, ProjectState& out, juce::
     st.countIn = get(so, "countIn", st.countIn);
     st.mainNeedsWindow = get(so, "mainNeedsWindow", st.mainNeedsWindow);
     st.hostPlays = (HostPlays) juce::jlimit(0, 2, get(so, "hostPlays", (int) st.hostPlays));
-    st.hostCapture = (HostCapture) juce::jlimit(0, 2, get(so, "hostCapture", (int) st.hostCapture));
+    // "hostCapture" (before 2026-11-26) defaulted to writing while the DAW plays: such saves start with REC only
+    st.hostCapture = (HostCapture) juce::jlimit(0, 2, get(so, "hostCapture2", (int) HostCapture::Off));
     out = s;
     return true;
 }

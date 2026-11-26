@@ -411,6 +411,62 @@ void testCountIn()
     CHECK(ons == 1 && tick == 0, "count-in hits are not recorded, one just before the 'one' lands on it");
 }
 
+// REC lit + PLAY from MAIN's marker (maintainer 2026-11-26): one bar of count-in, then MAIN from the marker;
+// nothing of MAIN sounds during the count-in, a hit just before the marker lands on it
+void testCountInFromMarker()
+{
+    auto s = baseSnapshot();
+    s.loopTicks = kTicksPerBar * 2;
+    s.bpm = 120.0;
+    s.events = { { 0, 0, 240, 1.0f }, { 1, kTicksPerBar, 240, 1.0f } };
+    Rig r(s);
+    r.e.setRecording(true);
+    r.e.playWithCountIn(kTicksPerBar);
+    int seen = 0, last = 0;
+    for (int i = 0; i < 374; ++i)
+    {
+        if (i == 368) r.e.padDown(2, 1.0f);
+        r.block();
+        const int b = r.e.countInBeat.load();
+        if (b != last) { ++seen; last = b; }
+    }
+    CHECK(seen == 4, "count-in 1-2-3-4 before the marker");
+    CHECK(r.e.padHits[0].load() == 0 && r.e.padHits[1].load() == 0, "MAIN is silent during a count-in before the marker");
+    for (int i = 0; i < 6; ++i) r.block();
+    CHECK(r.e.padHits[1].load() == 1 && r.e.padHits[0].load() == 0, "MAIN starts at the marker (bar 2), not at bar 1");
+    int ons = 0; int64_t tick = -1;
+    RecordedHit h;
+    while (r.e.popRecordedHit(h)) if (h.type == RecordedHit::On && h.rec) { ++ons; tick = h.tick; }
+    CHECK(ons == 1 && tick == kTicksPerBar, "a hit just before the marker is recorded on it");
+    // PLAY without a count-in starts at the marker too
+    Rig q(s);
+    q.e.playFrom(kTicksPerBar);
+    for (int i = 0; i < 6; ++i) q.block();
+    CHECK(q.e.padHits[1].load() == 1 && q.e.padHits[0].load() == 0, "PLAY from the marker");
+}
+
+// the DAW's Play writes into MAIN only with REC lit; older projects (written while FL played) load that way
+void testDawRecordsOnlyWithRec()
+{
+    ProjectState fresh;
+    CHECK(fresh.settings.hostCapture == HostCapture::Off, "new projects: the DAW's Play records only with REC");
+    auto json = juce::JSON::parse(Serialization::toJson(fresh));
+    if (auto* so = json["settings"].getDynamicObject())
+    {
+        so->removeProperty("hostCapture2");
+        so->setProperty("hostCapture", (int) HostCapture::WhenRecording);
+    }
+    ProjectState old;
+    juce::String err;
+    CHECK(Serialization::fromJson(juce::JSON::toString(json), old, err) && old.settings.hostCapture == HostCapture::Off,
+          "an older project stops writing while FL plays");
+    ProjectState chosen = fresh;
+    chosen.settings.hostCapture = HostCapture::Always;
+    ProjectState back;
+    CHECK(Serialization::fromJson(Serialization::toJson(chosen), back, err) && back.settings.hostCapture == HostCapture::Always,
+          "a capture mode chosen after the change is kept");
+}
+
 // a hit that was quantized forward must not sound a second time in the same pass
 void testNoDoubleAfterRecord()
 {
@@ -896,6 +952,8 @@ int main(int argc, char** argv)
     testWindowClosed();
     testAuditionMetroAndMarks();
     testCountIn();
+    testCountInFromMarker();
+    testDawRecordsOnlyWithRec();
     testNoDoubleAfterRecord();
     testRendererSync();
     testKeyTranspose();

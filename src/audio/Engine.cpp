@@ -102,13 +102,14 @@ void Engine::setInternalPlaying(bool shouldPlay, bool fromStart)
 
 void Engine::playFrom(int64_t loopTick)
 {
-    Cmd c; c.type = Cmd::Play; c.flag = true; c.a = std::max<int64_t>(0, loopTick);
+    Cmd c; c.type = Cmd::Play; c.flag = true; c.a = std::max<int64_t>(0, loopTick); c.b = c.a;
     pushCmd(c);
 }
 
-void Engine::playWithCountIn()
+void Engine::playWithCountIn(int64_t loopTick)
 {
-    Cmd c; c.type = Cmd::Play; c.flag = true; c.a = -(int64_t) kTicksPerBar;
+    loopTick = std::max<int64_t>(0, loopTick);
+    Cmd c; c.type = Cmd::Play; c.flag = true; c.a = loopTick - (int64_t) kTicksPerBar; c.b = loopTick;
     pushCmd(c);
 }
 
@@ -394,8 +395,10 @@ void Engine::pushMark(int pad, int offset)
 void Engine::pushHit(RecordedHit::Type type, const Ev& e, bool rec)
 {
     const double absTick = blockStartTick + e.offset * ticksPerSample;
-    if (absTick < -(double) (kPPQ / 4)) return;      // count-in: free playing
-    const int64_t tick = absTick < 0.0 ? 0 : currentLoopTick(e.offset); // a hit just before the "one" belongs to it
+    const double one = hostDriving ? 0.0 : countInEnd; // where the count-in ends (PLAY's start position)
+    if (absTick < one - (double) (kPPQ / 4)) return;  // count-in: free playing
+    const int64_t tick = absTick < one ? (int64_t) std::fmod(std::max(0.0, one), (double) loopTicks)
+                                       : currentLoopTick(e.offset); // a hit just before the "one" belongs to it
     RecordedHit h { type, e.pad, tick, e.vel, e.token, rec, hostDriving, pass };
     if (rec && type == RecordedHit::On)
     {
@@ -487,15 +490,15 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
                     for (auto& o : offs) o.active = false;
                     stopPreviewNow();
                     internalPlaying = true;
-                    if (c.flag) internalTick = (double) c.a;
+                    if (c.flag) { internalTick = (double) c.a; countInEnd = (double) c.b; }
                     lastEndTick = internalTick;
                     break;
                 case Cmd::Stop:
-                    internalPlaying = false; internalTick = 0.0;
+                    internalPlaying = false; internalTick = 0.0; countInEnd = 0.0;
                     if (!hostDriving) fadeTokens(kSeqToken);
                     break;
                 case Cmd::StopAll:
-                    internalPlaying = false; internalTick = 0.0;
+                    internalPlaying = false; internalTick = 0.0; countInEnd = 0.0;
                     stopPreviewNow();
                     fadeTokens(handTokens | (hostDriving ? 0u : kSeqToken));
                     dropPendingOns();
@@ -643,6 +646,7 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
                 const int64_t inSixteenth = e.tick % (kPPQ / 2);
                 if (s.swing > 0.0f && std::abs(inSixteenth - kPPQ / 4) <= 8) t += s.swing * (kPPQ / 6.0); // off-beat 1/16 swing
                 if (t < startTick || t >= endTick) continue;
+                if (!hostDriving && t < countInEnd) continue; // the count-in bar before PLAY's start position
                 if (e.rawTick >= 0) // just recorded and quantized forward: it was already heard
                 {
                     bool heard = false;
@@ -663,12 +667,12 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
             }
         }
         // metronome clicks on beats
-        const bool counting = !hostDriving && startTick < 0.0;
+        const bool counting = !hostDriving && startTick < countInEnd && countInEnd - startTick <= (double) kTicksPerBar + 1.0;
         if ((s.metronome && !gated) || counting)
         {
             const int64_t b0 = (int64_t) std::ceil(startTick / kPPQ), b1 = (int64_t) std::floor(endTick / kPPQ); // as above
             for (int64_t b = b0; b <= b1; ++b)
-                if ((double) b * kPPQ < endTick && (s.metronome || b < 0)) addEv((int) (((double) b * kPPQ - startTick) / ticksPerSample), 2, (b % 4) == 0 ? 1 : 0, 0.0f, 0);
+                if ((double) b * kPPQ < endTick && (s.metronome || (counting && (double) b * kPPQ < countInEnd))) addEv((int) (((double) b * kPPQ - startTick) / ticksPerSample), 2, (b % 4) == 0 ? 1 : 0, 0.0f, 0);
         }
     }
 
@@ -756,10 +760,10 @@ void Engine::process(juce::AudioBuffer<float>& out, juce::MidiBuffer& midi, cons
         if (!(host.valid && host.playing)) internalTick = endTick;
         double m = std::fmod(endTick, (double) loopTicks);
         if (m < 0) m += (double) loopTicks;
-        playheadTick.store(!hostDriving && endTick < 0.0 ? 0.0 : m);
+        playheadTick.store(!hostDriving && endTick < countInEnd ? std::fmod(std::max(0.0, countInEnd), (double) loopTicks) : m);
     }
-    countInBeat.store(playing && !hostDriving && endTick < 0.0
-                          ? juce::jlimit(1, 4, (int) std::floor((endTick + kTicksPerBar) / kPPQ) + 1) : 0);
+    countInBeat.store(playing && !hostDriving && endTick < countInEnd
+                          ? juce::jlimit(1, 4, (int) std::floor((endTick - (countInEnd - kTicksPerBar)) / kPPQ) + 1) : 0);
     int hand = 0;
     for (const auto& v : voices)
         if (v.active && v.stage != Stage::Fade && v.stage != Stage::Release && (v.token & handTokens) != 0) ++hand;

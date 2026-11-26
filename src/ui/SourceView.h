@@ -71,6 +71,10 @@ public:
     std::shared_ptr<const SourceData> data() const { return proc.project.sourceDataForSlot(slot); }
     SourceGrid grid() const { return proc.gridForSource(slot); }
     void auditionSelection(bool keepPosition = false); // keepPosition: a playing audition goes on (edges moved)
+    // after an edit of the selection: AUTO ALL plays all of it, AUTO EDGE 2 s at the moved edge (0 start, 1 end, -1 any),
+    // AUTO OFF nothing; a playing audition goes on with the new edges
+    void auditionAfterEdit(int edge);
+    void refreshAutoButton();
     bool auditioningHere() const;
     void auditionFrom(int64_t frame);
     void stopAudition();

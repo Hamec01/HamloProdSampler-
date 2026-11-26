@@ -204,7 +204,7 @@ void ControlStrip::timerCallback()
 {
     const auto n = proc.nowPlaying();
     using Who = HPSamplerProcessor::NowPlaying::Who;
-    const auto col = n.who == Who::Daw ? (proc.engine.hostRecording.load() ? theme::rec : theme::ok)
+    const auto col = n.who == Who::Daw ? (proc.engine.hostRecording.load() || proc.isRecordArmed() ? theme::rec : theme::ok)
                    : n.who == Who::Main ? theme::accent : n.who == Who::Nothing ? theme::textDim : theme::wave;
     if (n.title != now.value || n.detail != now.sub || now.valueColour != col)
     {
@@ -214,8 +214,7 @@ void ControlStrip::timerCallback()
     const bool src = proc.ui.view >= 0;
     playBtn.setToggleState(src ? proc.engine.previewFrame.load() >= 0.0 : n.who == Who::Main, juce::dontSendNotification);
     playBtn.setEnabled(src || n.who != Who::Daw); // in MAIN the DAW leads
-    recBtn.setToggleState(proc.isRecordArmed() || (proc.engine.hostRecording.load()
-                          && proc.project.state().settings.hostCapture != HostCapture::Off), juce::dontSendNotification);
+    recBtn.setToggleState(proc.isRecordArmed(), juce::dontSendNotification); // red only when REC is armed
     if (++captureTick >= 6)
     {
         captureTick = 0;
