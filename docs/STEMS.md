@@ -32,6 +32,28 @@ they live in a disk cache and come back on their own when a project with a stem 
   The cache key is the file path, size, modification time, frame count and rate.
   `stems.json` is written last; without it, a cache folder counts as incomplete.
 
+## Notes for HPDG (bass line)
+
+* After the split, HPStems transcribes the BASS, VOX and INST stems with Basic Pitch (Spotify, Apache-2.0,
+  the dependency-free C++ port from HPDG in `third_party/basic_pitch`) into `notes.json` in the cache.
+  This takes about 2 s for 30 s of audio. Older caches get it on load (`HPStems --notes-only --out <dir>`).
+* The plug-in builds one bass line from the BASS notes (`bassLineOf`): MIDI <= 55, octave/twelfth ghosts dropped,
+  monophonic (a new attack ends the sounding note). It travels with the source data (`SourceData::notes`).
+* Notes are recognised **once per source**, never on MAIN. MAIN is what HPDG gets, and it is computed:
+  the bridge's MAIN model (slice, stretch / repitch, reverse, gate, cut groups, loop) says which source moment
+  sounds at each 1/128. The bass note there + the pad's transpose (key follow + pitch + fine) gives the note
+  in the project key. Example: source A min, project B min, so +2 st: A1 in the source is sent as B1.
+* Context for HPDG (hp.sample-context.v1, backward compatible):
+  - per-step `bassMidi` / `bassConfidence` come from the stem notes where a source has them
+    (confidence 0.6-0.95), otherwise from the classical estimate as before. HPDG uses these today.
+  - new optional `bassNotes`: `[startTick, lengthTicks, midi, velocity, confidence]`, the exact MAIN bass line.
+    Older peers ignore it.
+  - A muted / off BASS stem sends no bass from that source.
+* MAIN shows the line as the strip "BASS -> HPDG" under the drum guide.
+* Checked: `tools/stems/bass_truth_test.py` (a mix with a known bass line: 71/72 notes exact after split +
+  transcription) and `HPSAMPLER_BassCheck <dir>` (end to end: 10/10 notes at +2 st key follow and +7 st with pad pitch,
+  per-step bassMidi right, muted BASS = no bass, protocol round trip).
+
 ## Installing the engine
 
 The engine ships **inside the plug-in**. The build copies `HPStems.exe`, `onnxruntime.dll`,

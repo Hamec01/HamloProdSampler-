@@ -49,7 +49,7 @@
 | `Source/Analysis/STFTAnalyzer.h` | **Переиспользовать (адаптировать)** | Классический Hann STFT, spectral flux, low/mid/high energy, spectral flatness. |
 | `Source/Analysis/OnsetDetector.h` | **Переиспользовать (адаптировать)** | Классический multiband onset detector с адаптивным порогом. |
 | `Source/Analysis/SampleHarmonyAnalyzer.cpp` (часть Chroma + Albrecht-Shanahan / Krumhansl-Kessler) | **Переиспользовать (только классический путь)** | 12-bin chroma + корреляция с профилями major/minor, уверенность и отказ на шуме/перкуссии. |
-| `Source/Analysis/BasicPitch/*` | **СТРОГО ИСКЛЮЧЕНО** | Содержит веса нейросети Basic Pitch. Запрещено Требованием #2 (без нейронных сетей). |
+| `Source/Analysis/BasicPitch/*` | **Можно переиспользовать в `HPStems`** | Нейросеть Basic Pitch. Требование #2 уточнено 2026-11-28: запрет нейросетей относился к HPDG. В плагин не встраивать — только в отдельный процесс HPStems (как стемы). |
 | `Source/Audio/LofiColor.h/.cpp` (уравнения HamloMag tube + HamloComp vari-mu) | **Переиспользовать (адаптировать в `FX Lite`)** | Лёгкий zero-latency, zero-alloc DSP-код без вложенного VST. |
 | `Source/Services/HamloLinkProtocol.h/.cpp` | **Переиспользовать (read-only адаптер)** | Чтение живых инстансов HPDG в `HPBridgeCore::HamloLinkReader`. |
 | `Assets/Images/Logo.png` | **Доступен** | Фирменный логотип HamloProd присутствует в `C:\DRUMENGINE\Assets\Images\Logo.png`. |

@@ -154,8 +154,9 @@ target_include_directories(HPSAMPLER_RawVst3Check PRIVATE ${HPSAMPLER_JUCE_DIR}/
 # ----------------------------------------------------------------------------
 set(HPSAMPLER_ORT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
 if (EXISTS "${HPSAMPLER_ORT_DIR}/include/onnxruntime_cxx_api.h")
-    add_executable(HPStems stems_helper/HPStems.cpp)
-    target_include_directories(HPStems PRIVATE "${HPSAMPLER_ORT_DIR}/include")
+    add_executable(HPStems stems_helper/HPStems.cpp
+        third_party/basic_pitch/BasicPitchTranscriber.cpp third_party/basic_pitch/BasicPitchWeights.cpp)
+    target_include_directories(HPStems PRIVATE "${HPSAMPLER_ORT_DIR}/include" third_party/basic_pitch)
     target_link_libraries(HPStems PRIVATE "${HPSAMPLER_ORT_DIR}/lib/onnxruntime.lib" juce::juce_audio_formats juce::juce_dsp juce::juce_recommended_config_flags shell32)
     target_compile_definitions(HPStems PRIVATE JUCE_STANDALONE_APPLICATION=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
     add_custom_command(TARGET HPStems POST_BUILD
@@ -188,3 +189,9 @@ add_executable(HPSAMPLER_StemsCheck WIN32 tools/StemsCheck.cpp)
 target_link_libraries(HPSAMPLER_StemsCheck PRIVATE HPSAMPLER HPSAMPLER_Core juce::juce_audio_utils)
 target_compile_definitions(HPSAMPLER_StemsCheck PRIVATE JUCE_STANDALONE_APPLICATION=1)
 target_include_directories(HPSAMPLER_StemsCheck PRIVATE src)
+
+# Bass line for HPDG from the stems, end to end against a known bass line (not shipped)
+add_executable(HPSAMPLER_BassCheck WIN32 tools/BassCheck.cpp)
+target_link_libraries(HPSAMPLER_BassCheck PRIVATE HPSAMPLER HPSAMPLER_Core juce::juce_audio_utils)
+target_compile_definitions(HPSAMPLER_BassCheck PRIVATE JUCE_STANDALONE_APPLICATION=1)
+target_include_directories(HPSAMPLER_BassCheck PRIVATE src)

@@ -363,6 +363,20 @@ juce::String BridgeValidator::toJson(const SamplerContextSnapshot& s)
         features->setProperty("steps", rows);
         root->setProperty("features", juce::var(features.release()));
     }
+    if (!s.bassNotes.empty())
+    {
+        // [startTick, lengthTicks, midi, velocity, confidence]; older peers ignore the field
+        juce::Array<juce::var> notes;
+        for (const auto& n : s.bassNotes)
+        {
+            juce::Array<juce::var> row;
+            row.add((juce::int64) n.startTick); row.add((juce::int64) n.lengthTicks); row.add(n.midi);
+            row.add(std::round((double) n.velocity * 1000.0) / 1000.0);
+            row.add(std::round((double) n.confidence * 1000.0) / 1000.0);
+            notes.add(row);
+        }
+        root->setProperty("bassNotes", notes);
+    }
 
     return juce::JSON::toString(juce::var(root.release()), s.featureVersion != 0);
 }
@@ -607,6 +621,26 @@ ValidationResult BridgeValidator::fromJson(const juce::String& jsonText, Sampler
             step.bassMidi = (int) bass;
             step.bassConfidence = (float) (double) (*row)[18]; step.confidence = (float) (double) (*row)[19];
             s.features.push_back(step);
+        }
+    }
+    if (const auto* notes = parsed.getProperty("bassNotes", {}).getArray())
+    {
+        if (notes->size() > 4096) return ValidationResult::failure("Too many bass notes");
+        for (const auto& value : *notes)
+        {
+            const auto* row = value.getArray();
+            if (row == nullptr || row->size() != 5) return ValidationResult::failure("Invalid bass note");
+            for (const auto& cell : *row)
+                if (!(cell.isInt() || cell.isInt64() || cell.isDouble())) return ValidationResult::failure("Bass note cells must be numbers");
+            BassNoteDto n;
+            n.startTick = (int64_t) (*row)[0]; n.lengthTicks = (int64_t) (*row)[1];
+            const double midi = (double) (*row)[2];
+            if (!isFiniteInRange(midi, 0, 127) || midi != std::floor(midi) || n.startTick < 0 || n.lengthTicks <= 0)
+                return ValidationResult::failure("Invalid bass note");
+            n.midi = (int) midi;
+            n.velocity = juce::jlimit(0.0f, 1.0f, (float) (double) (*row)[3]);
+            n.confidence = juce::jlimit(0.0f, 1.0f, (float) (double) (*row)[4]);
+            s.bassNotes.push_back(n);
         }
     }
 

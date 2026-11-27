@@ -230,7 +230,9 @@ private:
     juce::String bridgeName;
     std::array<bool, kNumSources> restoredSlot {}; // restored from DAW state: never auto-anchor
     // stems: the decoded source as loaded; the project's store holds the rebalanced copy while a mix is on
-    std::array<std::shared_ptr<const SourceData>, kNumSources> originalData;
+    std::array<std::shared_ptr<const SourceData>, kNumSources> loaderData;   // as decoded / analysed
+    std::array<std::shared_ptr<const SourceData>, kNumSources> originalData; // loaderData + the stems' notes
+    void refreshOriginal(int slot);
     std::array<uint64_t, kNumSources> stemMixApplied {}; // 0 = the original is published
     std::array<bool, kNumSources> stemMixBusy {};
     uint64_t stemMixKey(int slot) const;

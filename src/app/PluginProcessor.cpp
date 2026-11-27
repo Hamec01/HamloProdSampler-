@@ -17,9 +17,10 @@ HPSamplerProcessor::HPSamplerProcessor()
     {
         if (project.state().sources[(size_t) slot].id != data->id) return; // replaced meanwhile
         if (stems.sourceIdOf(slot).isNotEmpty() && stems.sourceIdOf(slot) != data->id) stems.forget(slot);
-        originalData[(size_t) slot] = data;
+        loaderData[(size_t) slot] = data;
+        refreshOriginal(slot);
         stemMixApplied[(size_t) slot] = 0;
-        project.setSourceData(data);
+        project.setSourceData(originalData[(size_t) slot]);
         if (analysed && stems.state(slot) == StemSeparator::State::None && !project.state().sources[(size_t) slot].stemMixIsUnity()
             && stemsCached(slot))
             loadCachedStems(slot); // the project was saved with a stem mix: bring it back
@@ -365,7 +366,7 @@ void HPSamplerProcessor::loadSource(int slot, const juce::File& file)
     });
     ui.src[(size_t) slot] = UiState::SrcView {};
     stems.forget(slot);
-    originalData[(size_t) slot] = nullptr;
+    loaderData[(size_t) slot] = originalData[(size_t) slot] = nullptr;
     stemMixApplied[(size_t) slot] = 0;
     loading[(size_t) slot] = true;
     restoredSlot[(size_t) slot] = false;
@@ -388,8 +389,22 @@ void HPSamplerProcessor::clearSource(int slot)
     });
     ui.src[(size_t) slot] = UiState::SrcView {};
     stems.forget(slot);
-    originalData[(size_t) slot] = nullptr;
+    loaderData[(size_t) slot] = originalData[(size_t) slot] = nullptr;
     stemMixApplied[(size_t) slot] = 0;
+}
+
+void HPSamplerProcessor::refreshOriginal(int slot)
+{
+    const auto raw = loaderData[(size_t) slot];
+    auto& orig = originalData[(size_t) slot];
+    if (raw == nullptr) { orig = nullptr; return; }
+    const auto set = stems.stems(slot);
+    const auto notes = set != nullptr && set->sourceId == raw->id ? set->notes : nullptr;
+    if (notes == nullptr) { orig = raw; return; }
+    if (orig != nullptr && orig != raw && orig->id == raw->id && orig->notes == notes) return;
+    auto d = std::make_shared<SourceData>(*raw);
+    d->notes = notes;
+    orig = std::move(d);
 }
 
 // --------------------------------------------------------------------------------------------
@@ -438,6 +453,7 @@ void HPSamplerProcessor::deleteStems(int slot)
     const auto d = originalData[(size_t) slot];
     stems.forget(slot);
     if (d != nullptr) StemSeparator::cacheDirFor(project.state().sources[(size_t) slot], *d).deleteRecursively();
+    refreshOriginal(slot);
     updateStemMix(slot);
     setStatus("SRC " + juce::String(slot + 1) + ": stems deleted, the original is heard");
     listeners.call([](Listener& l) { l.projectChanged(); });
@@ -466,13 +482,13 @@ void HPSamplerProcessor::updateStemMix(int slot)
     const auto orig = originalData[(size_t) slot];
     if (orig == nullptr) return;
     const uint64_t want = stemMixKey(slot);
-    if (want == stemMixApplied[(size_t) slot] || stemMixBusy[(size_t) slot]) return; // a running mix re-checks when done
-    if (want == 0)
+    if (want == 0 && !stemMixBusy[(size_t) slot])
     {
         stemMixApplied[(size_t) slot] = 0;
-        if (project.sourceDataForSlot(slot) != orig) project.setSourceData(orig);
+        if (project.sourceDataForSlot(slot) != orig) project.setSourceData(orig); // also: the same audio, now with notes
         return;
     }
+    if (want == stemMixApplied[(size_t) slot] || stemMixBusy[(size_t) slot]) return; // a running mix re-checks when done
     stemMixBusy[(size_t) slot] = true;
     stemMixPool.addJob([this, flag = alive, slot, want, orig, set = stems.stems(slot), src = project.state().sources[(size_t) slot]]()
     {
@@ -502,6 +518,7 @@ void HPSamplerProcessor::stemsChanged(int slot)
     const auto st = stems.state(slot);
     if (st == S::Ready)
     {
+        refreshOriginal(slot); // the notes travel with the source data from now on
         if (!stemMixBusy[(size_t) slot] && stemMixApplied[(size_t) slot] == 0 && project.state().sources[(size_t) slot].stemMixIsUnity())
             setStatus("SRC " + juce::String(slot + 1) + ": stems ready - DRUMS / BASS / VOX / INST. Drag a cell up / down = level, click = mute, double-click = 0 dB.");
         updateStemMix(slot);

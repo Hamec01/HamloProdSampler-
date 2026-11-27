@@ -32,6 +32,71 @@ std::shared_ptr<juce::AudioBuffer<float>> mixStems(const StemSet& set, const Sou
 
 // --------------------------------------------------------------------------------------------
 
+bool bassStemAudible(const SourceSlot& slot)
+{
+    return !(slot.stemsOn && (slot.stemMute[kStemBass] || slot.stemDb[kStemBass] <= kStemMinDb));
+}
+
+std::vector<SourceNote> bassLineOf(std::vector<SourceNote> notes)
+{
+    constexpr int kHighest = 55; // G3: above it the BASS stem holds bleed / harmonics, not the line
+    notes.erase(std::remove_if(notes.begin(), notes.end(), [](const SourceNote& n)
+        { return n.midi > kHighest || n.amp < 0.2f || n.end - n.start < 0.06; }), notes.end());
+    // octave / twelfth ghosts of a louder note sounding at the same time
+    std::vector<bool> ghost(notes.size(), false);
+    for (size_t i = 0; i < notes.size(); ++i)
+        for (size_t j = 0; j < notes.size(); ++j)
+        {
+            const auto& n = notes[i];
+            const auto& o = notes[j];
+            const int d = n.midi - o.midi;
+            if (i == j || (d != 12 && d != 19 && d != 24) || o.amp < 0.6f * n.amp) continue;
+            const double overlap = std::min(n.end, o.end) - std::max(n.start, o.start);
+            if (overlap > 0.5 * (n.end - n.start)) { ghost[i] = true; break; }
+        }
+    std::vector<SourceNote> kept;
+    for (size_t i = 0; i < notes.size(); ++i) if (!ghost[i]) kept.push_back(notes[i]);
+    std::sort(kept.begin(), kept.end(), [](const SourceNote& a, const SourceNote& b) { return a.start < b.start; });
+    std::vector<SourceNote> line;
+    for (const auto& n : kept)
+    {
+        if (!line.empty() && line.back().end > n.start)
+        {
+            if (n.start - line.back().start < 0.03) // same attack: keep the lower / louder one
+            {
+                if (n.midi < line.back().midi || (n.midi == line.back().midi && n.amp > line.back().amp)) line.back() = n;
+                continue;
+            }
+            line.back().end = n.start;
+            if (line.back().end - line.back().start < 0.04) line.pop_back();
+        }
+        line.push_back(n);
+    }
+    return line;
+}
+
+std::shared_ptr<SourceNotes> readStemNotes(const juce::File& f)
+{
+    if (!f.existsAsFile()) return nullptr;
+    const auto v = juce::JSON::parse(f);
+    if (v["format"].toString() != "hp.notes.v1") return nullptr;
+    auto out = std::make_shared<SourceNotes>();
+    auto read = [&](const char* name, std::vector<SourceNote>& dst)
+    {
+        if (auto* arr = v["stems"][name].getArray())
+            for (const auto& n : *arr)
+                if (auto* a = n.getArray(); a != nullptr && a->size() >= 4)
+                    dst.push_back({ (double) a->getReference(0), (double) a->getReference(1), (int) a->getReference(2),
+                                    (float) (double) a->getReference(3) });
+        std::sort(dst.begin(), dst.end(), [](const SourceNote& a, const SourceNote& b) { return a.start < b.start; });
+    };
+    read("bass", out->bass);
+    read("vocals", out->vox);
+    read("other", out->inst);
+    out->bassLine = bassLineOf(out->bass);
+    return out;
+}
+
 juce::File StemSeparator::installHint()
 {
     return juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("HamloProd/HPSAMPLER/HPStems");
@@ -97,7 +162,54 @@ struct StemSeparator::Job : juce::Thread
         if (split && !runHelper()) return;
         if (threadShouldExit()) return;
         loading = true;
+        if (!dir.getChildFile("notes.json").existsAsFile() && StemSeparator::helperExe() != juce::File())
+        {
+            // stems from before the transcription: add the notes (seconds, no new split)
+            runChild({ StemSeparator::helperExe().getFullPathName(), "--notes-only", "--out", dir.getFullPathName(),
+                       "--threads", juce::String(juce::jmax(1, juce::SystemStats::getNumPhysicalCpus() - 1)) });
+            if (threadShouldExit()) return;
+        }
         if (!loadStems()) return;
+    }
+
+    // runs the helper and follows its progress; true = it said DONE
+    bool runChild(const juce::StringArray& args, juce::String* errorOut = nullptr)
+    {
+        {
+            const juce::ScopedLock sl(lock);
+            child = std::make_unique<juce::ChildProcess>();
+            if (!child->start(args, juce::ChildProcess::wantStdOut))
+            {
+                child.reset();
+                if (errorOut != nullptr) *errorOut = "cannot start HPStems.exe";
+                return false;
+            }
+        }
+        juce::String pendingText, lastError;
+        bool done = false;
+        char buf[1]; // JUCE's read waits until the buffer is full: one byte keeps the progress live
+        for (;;)
+        {
+            const int n = child->readProcessOutput(buf, (int) sizeof(buf));
+            if (n <= 0) { if (!child->isRunning()) break; juce::Thread::sleep(20); continue; }
+            pendingText += juce::String::fromUTF8(buf, n);
+            for (int nl; (nl = pendingText.indexOfChar('\n')) >= 0;)
+            {
+                const auto line = pendingText.substring(0, nl).trim();
+                pendingText = pendingText.substring(nl + 1);
+                if (line.startsWith("HPSTEMS PROGRESS ")) progress = line.fromLastOccurrenceOf(" ", false, false).getFloatValue();
+                else if (line == "HPSTEMS DONE") done = true;
+                else if (line.startsWith("HPSTEMS ERROR ")) lastError = line.fromFirstOccurrenceOf("ERROR ", false, false);
+            }
+            if (threadShouldExit()) break;
+        }
+        {
+            const juce::ScopedLock sl(lock);
+            if (threadShouldExit() && child->isRunning()) child->kill();
+            child.reset();
+        }
+        if (errorOut != nullptr) *errorOut = lastError;
+        return done && !threadShouldExit();
     }
 
     bool fail(const juce::String& e) { error = e; return false; }
@@ -124,34 +236,8 @@ struct StemSeparator::Job : juce::Thread
 
         juce::StringArray args { exe.getFullPathName(), "--in", input.getFullPathName(), "--out", dir.getFullPathName(),
                                  "--threads", juce::String(juce::jmax(1, juce::SystemStats::getNumPhysicalCpus() - 1)) };
-        {
-            const juce::ScopedLock sl(lock);
-            child = std::make_unique<juce::ChildProcess>();
-            if (!child->start(args, juce::ChildProcess::wantStdOut)) { child.reset(); input.deleteFile(); return fail("cannot start HPStems.exe"); }
-        }
-        juce::String pendingText, lastError;
-        bool done = false;
-        char buf[1]; // JUCE's read waits until the buffer is full: one byte keeps the progress live
-        for (;;)
-        {
-            const int n = child->readProcessOutput(buf, (int) sizeof(buf));
-            if (n <= 0) { if (!child->isRunning()) break; juce::Thread::sleep(20); continue; }
-            pendingText += juce::String::fromUTF8(buf, n);
-            for (int nl; (nl = pendingText.indexOfChar('\n')) >= 0;)
-            {
-                const auto line = pendingText.substring(0, nl).trim();
-                pendingText = pendingText.substring(nl + 1);
-                if (line.startsWith("HPSTEMS PROGRESS ")) progress = line.fromLastOccurrenceOf(" ", false, false).getFloatValue();
-                else if (line == "HPSTEMS DONE") done = true;
-                else if (line.startsWith("HPSTEMS ERROR ")) lastError = line.fromFirstOccurrenceOf("ERROR ", false, false);
-            }
-            if (threadShouldExit()) break;
-        }
-        {
-            const juce::ScopedLock sl(lock);
-            if (threadShouldExit() && child->isRunning()) child->kill();
-            child.reset();
-        }
+        juce::String lastError;
+        const bool done = runChild(args, &lastError);
         input.deleteFile();
         if (threadShouldExit()) return false;
         if (!done || !StemSeparator::hasCache(dir)) return fail(lastError.isNotEmpty() ? lastError : juce::String("HPStems stopped without a result"));
@@ -177,6 +263,7 @@ struct StemSeparator::Job : juce::Thread
             set->stems[(size_t) k] = b;
             if (threadShouldExit()) return false;
         }
+        set->notes = readStemNotes(dir.getChildFile("notes.json"));
         result = set;
         return true;
     }

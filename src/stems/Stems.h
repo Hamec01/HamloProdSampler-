@@ -26,7 +26,16 @@ struct StemSet
     juce::String sourceId;
     double sampleRate = 44100.0;
     std::array<std::shared_ptr<const juce::AudioBuffer<float>>, kNumStems> stems;
+    std::shared_ptr<const SourceNotes> notes; // notes.json of the cache (null = none)
 };
+
+// notes.json (hp.notes.v1) -> notes incl. the bass line; null when missing / unreadable.
+std::shared_ptr<SourceNotes> readStemNotes(const juce::File& notesJson);
+// One bass line from the BASS stem's notes: low register only, octave ghosts dropped, monophonic
+// (a new attack ends the sounding note).
+std::vector<SourceNote> bassLineOf(std::vector<SourceNote> notes);
+// The BASS stem can be heard in this slot's mix (its notes count for HPDG).
+bool bassStemAudible(const SourceSlot& slot);
 
 // Mixed audio of a source: sum of the stems at the slot's levels (message thread or worker).
 std::shared_ptr<juce::AudioBuffer<float>> mixStems(const StemSet& set, const SourceSlot& slot, int64_t frames);

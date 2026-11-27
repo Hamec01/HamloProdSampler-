@@ -1,4 +1,5 @@
 #include "ui/PatternView.h"
+#include "bridge/BridgeAdapter.h"
 
 namespace hps
 {
@@ -132,7 +133,69 @@ juce::Rectangle<int> LaneCanvas::velocityArea() const
 juce::Rectangle<int> LaneCanvas::notesArea() const
 {
     const bool guide = owner.proc.ui.showGuide && owner.proc.guide.present;
-    return getLocalBounds().withTrimmedTop(kRulerH + (guide ? kGuideH : 0)).withTrimmedBottom(velocityArea().getHeight());
+    return getLocalBounds().withTrimmedTop(kRulerH + (guide ? kGuideH : 0) + (bassNotes.empty() ? 0 : kBassH))
+                           .withTrimmedBottom(velocityArea().getHeight());
+}
+
+int LaneCanvas::bassStripY() const
+{
+    return kRulerH + (owner.proc.ui.showGuide && owner.proc.guide.present ? kGuideH : 0);
+}
+
+void LaneCanvas::updateBass()
+{
+    const auto rev = owner.proc.project.revision();
+    if (rev == bassRevision) return;
+    bassRevision = rev;
+    const bool had = !bassNotes.empty();
+    bassNotes.clear();
+    bool anyNotes = false;
+    for (int i = 0; i < kNumSources; ++i)
+        if (const auto d = owner.proc.project.sourceDataForSlot(i); d != nullptr && d->notes != nullptr) anyNotes = true;
+    if (anyNotes) bassNotes = BridgeAdapter::buildSamplerContext(owner.proc.project, 1, {}).bassNotes; // ~1 ms
+    if (had != !bassNotes.empty()) layoutKnobs();
+    repaint();
+}
+
+void LaneCanvas::drawBass(juce::Graphics& g, int64_t loop)
+{
+    if (bassNotes.empty()) return;
+    const auto strip = juce::Rectangle<int>(0, bassStripY(), getWidth(), kBassH);
+    g.setColour(theme::body);
+    g.fillRect(strip);
+    const juce::Colour c(0xffb27cff); // the BASS stem colour of the SRC strip
+    auto lab = strip.withWidth(kLabelW).reduced(6, 0);
+    g.setColour(c);
+    g.setFont(theme::ui(10.0f, true));
+    g.drawText("BASS -> HPDG", lab.removeFromTop(kBassH / 2 + 1), juce::Justification::bottomLeft);
+    g.setColour(theme::textDim);
+    g.setFont(theme::ui(9.5f));
+    g.drawText("from the BASS stems", lab, juce::Justification::topLeft);
+    int lo = 127, hi = 0;
+    for (const auto& n : bassNotes) { lo = std::min(lo, n.midi); hi = std::max(hi, n.midi); }
+    if (hi - lo < 7) { lo -= (7 - (hi - lo)) / 2; hi = lo + 7; }
+    const juce::Graphics::ScopedSaveState save(g);
+    g.reduceClipRegion(strip.withTrimmedLeft(kLabelW));
+    const auto inner = strip.withTrimmedLeft(kLabelW).reduced(0, 3).toFloat();
+    static const char* names[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    for (const auto& n : bassNotes)
+    {
+        if (n.startTick >= loop) continue;
+        const float x0 = (float) tickToX((double) n.startTick), x1 = (float) tickToX((double) (n.startTick + n.lengthTicks));
+        if (x1 < kLabelW || x0 > getWidth()) continue;
+        const float y = inner.getBottom() - (float) (n.midi - lo) / (float) (hi - lo) * (inner.getHeight() - 6.0f) - 6.0f;
+        const auto r = juce::Rectangle<float>(x0, y, std::max(2.0f, x1 - x0 - 1.0f), 6.0f);
+        g.setColour(c.withAlpha(0.35f + 0.6f * n.confidence * n.velocity));
+        g.fillRoundedRectangle(r, 2.0f);
+        if (r.getWidth() > 26.0f)
+        {
+            g.setColour(theme::text.withAlpha(0.9f));
+            g.setFont(theme::mono(9.0f, true));
+            const auto label = juce::String(names[n.midi % 12]) + juce::String(n.midi / 12 - 1);
+            const float ty = y > inner.getCentreY() ? y - 10.0f : y + 6.0f;
+            g.drawText(label, juce::Rectangle<float>(x0 + 2.0f, ty, r.getWidth() - 2.0f, 10.0f), juce::Justification::centredLeft);
+        }
+    }
 }
 
 std::vector<LaneCanvas::Row> LaneCanvas::rows() const
@@ -634,6 +697,8 @@ void LaneCanvas::paint(juce::Graphics& g)
                 if (h.lane != hpbridge::DrumLaneClass::Hat) g.drawVerticalLine((int) x, (float) gr.getBottom(), bottom);
             }
     }
+
+    drawBass(g, loop);
 
     // vertical scroll position
     if (const int ch = contentHeight(); ch > area.getHeight())
@@ -1673,6 +1738,7 @@ void PatternView::refresh()
     if (proc.guide.present) t << "  |  guide: " << proc.guide.origin << " " << juce::String(proc.guide.bpm, 1) << " BPM";
     info.setText(t, juce::dontSendNotification);
     lanes.updateKnobs();
+    lanes.updateBass();
     lanes.clampView(); // pads / pattern length may have changed
     repaint();
 }

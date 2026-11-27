@@ -171,6 +171,14 @@ struct SourceAnalysis
     std::vector<uint8_t> spectrogram;
 };
 
+// Notes transcribed from the stems (HPStems, Basic Pitch), in source seconds.
+struct SourceNote { double start = 0.0, end = 0.0; int midi = 0; float amp = 0.0f; };
+struct SourceNotes
+{
+    std::vector<SourceNote> bass, vox, inst;
+    std::vector<SourceNote> bassLine; // monophonic, low register, sorted, no overlaps (see bassLineOf)
+};
+
 struct WaveformPeaks
 {
     int framesPerPeak = 64;
@@ -185,6 +193,7 @@ struct SourceData
     std::shared_ptr<const juce::AudioBuffer<float>> audio; // stereo (mono duplicated)
     WaveformPeaks peaks;
     SourceAnalysis analysis;
+    std::shared_ptr<const SourceNotes> notes; // null = no stems / no transcription
     juce::String error;
 };
 

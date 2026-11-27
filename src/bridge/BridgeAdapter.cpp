@@ -1,5 +1,6 @@
 #include "bridge/BridgeAdapter.h"
 #include "render/PadRenderer.h"
+#include "stems/Stems.h"
 
 namespace hps
 {
@@ -60,6 +61,18 @@ void projectFeatures(const Project& project, hpbridge::SamplerContextSnapshot& c
     };
     std::array<Voice, 48> voices {};
     size_t trigger = 0;
+    // the bass line MAIN plays (stems only): one note per (voice, source note); open = the one sounding now
+    struct BassId { const PatternEvent* event = nullptr; double voiceStart = 0; const SourceNote* note = nullptr; int midi = -1; };
+    BassId open;
+    int64_t openStart = 0;
+    float openVelocity = 0, openConfidence = 0;
+    const double ticksPerSubstep = (kPPQ / 4.0) / substeps;
+    auto closeBass = [&](int64_t endTick)
+    {
+        if (open.note != nullptr && endTick > openStart)
+            context.bassNotes.push_back({ openStart, endTick - openStart, open.midi, openVelocity, openConfidence });
+        open = {};
+    };
     context.featureVersion = 1;
     context.features.resize((size_t) context.patternBars * 16);
     std::vector<float> lowOccupancy(context.features.size());
@@ -101,6 +114,9 @@ void projectFeatures(const Project& project, hpbridge::SamplerContextSnapshot& c
         }
         hpbridge::ContextStep mixed;
         float totalPower = 0, knownPower = 0, bassWeight = 0, bassTotal = 0;
+        bool bassFromStem = false;
+        float stemConfidence = 0, stemVelocity = 0;
+        BassId chosen;
         for (auto& v : voices)
         {
             if (v.event == nullptr) continue;
@@ -148,29 +164,66 @@ void projectFeatures(const Project& project, hpbridge::SamplerContextSnapshot& c
                     mixed.chroma[(size_t) (((lo + 1) % 12 + 12) % 12)] += weight * frac;
                 }
             const double seconds = frame / info.data->sampleRate;
+            const auto& srcSlot = st.sources[(size_t) p.src];
+            const auto* line = info.data->notes != nullptr && !info.data->notes->bassLine.empty() ? &info.data->notes->bassLine : nullptr;
             const auto bass = std::lower_bound(a.bass.begin(), a.bass.end(), seconds,
                 [](const SourceAnalysis::Bass& b, double s) { return b.end <= s; });
-            if (!a.atonal && a.drumLikelihood < 0.6f && bass != a.bass.end() && seconds >= bass->start && bass->midi >= 0)
+            if (line != nullptr) // the BASS stem knows: the exact note, or no bass at all from this voice
+            {
+                const auto it = std::upper_bound(line->begin(), line->end(), seconds,
+                                                 [](double s, const SourceNote& n) { return s < n.start; });
+                if (bassStemAudible(srcSlot) && it != line->begin() && seconds < std::prev(it)->end)
+                {
+                    const auto& n = *std::prev(it);
+                    const int note = n.midi + (int) std::lround(pitch);
+                    const float stemGain = srcSlot.stemsOn ? (float) dbToGain(srcSlot.stemDb[kStemBass]) : 1.0f;
+                    const float level = gain * stemGain * info.attenuation[0] * (0.35f + 0.65f * n.amp);
+                    const float weight = level * level;
+                    bassTotal += weight;
+                    if (weight > bassWeight && note >= 0 && note <= 127)
+                    {
+                        mixed.bassMidi = note; bassWeight = weight; bassFromStem = true;
+                        stemConfidence = 0.6f + 0.35f * n.amp;
+                        stemVelocity = juce::jlimit(0.05f, 1.0f, v.event->velocity * (0.35f + 0.65f * n.amp));
+                        chosen = { v.event, v.start, &n, note };
+                    }
+                }
+            }
+            else if (!a.atonal && a.drumLikelihood < 0.6f && bass != a.bass.end() && seconds >= bass->start && bass->midi >= 0)
             {
                 const int note = bass->midi + (int) std::lround(pitch);
                 const float weight = bands[0] * bands[0] * bass->confidence;
                 bassTotal += bands[0] * bands[0];
                 if (weight > bassWeight && note >= 0 && note <= 127)
-                { mixed.bassMidi = note; bassWeight = weight; }
+                { mixed.bassMidi = note; bassWeight = weight; bassFromStem = false; chosen = {}; }
             }
         }
         if (sample < 0) continue;
+        {
+            const int64_t tick = (int64_t) std::llround(sample * ticksPerSubstep);
+            const bool same = chosen.note != nullptr && chosen.note == open.note && chosen.event == open.event
+                              && chosen.voiceStart == open.voiceStart && chosen.midi == open.midi;
+            if (!same)
+            {
+                closeBass(tick);
+                if (chosen.note != nullptr) { open = chosen; openStart = tick; openVelocity = stemVelocity; openConfidence = stemConfidence; }
+            }
+        }
         auto& out = context.features[(size_t) sample / substeps];
         out.energy += mixed.energy / substeps;
         out.low += mixed.low / substeps; out.mid += mixed.mid / substeps; out.high += mixed.high / substeps;
         out.onset = std::max(out.onset, mixed.onset);
         out.confidence += (totalPower > 1.0e-12f ? knownPower / totalPower : 0) / substeps;
         for (size_t pc = 0; pc < 12; ++pc) out.chroma[pc] += mixed.chroma[pc];
-        const float bassConfidence = bassTotal > 1.0e-12f ? bassWeight / bassTotal * 0.7f : 0;
+        const float bassConfidence = bassTotal > 1.0e-12f ? bassWeight / bassTotal * (bassFromStem ? stemConfidence : 0.7f) : 0;
         if (bassConfidence > out.bassConfidence)
         { out.bassMidi = mixed.bassMidi; out.bassConfidence = bassConfidence; }
         lowOccupancy[(size_t) sample / substeps] += mixed.low > 1.0e-7f ? 1.0f / substeps : 0;
     }
+    closeBass((int64_t) context.features.size() * (kPPQ / 4));
+    // notes shorter than a 1/64 are switching noise between voices, not played notes
+    context.bassNotes.erase(std::remove_if(context.bassNotes.begin(), context.bassNotes.end(),
+        [](const hpbridge::BassNoteDto& n) { return n.lengthTicks < kPPQ / 16; }), context.bassNotes.end());
     float peak = 1.0e-9f;
     for (const auto& f : context.features) peak = std::max(peak, std::sqrt(f.energy));
     for (auto& f : context.features)

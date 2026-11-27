@@ -17,6 +17,8 @@
 
 #include <onnxruntime_cxx_api.h>
 
+#include "BasicPitchTranscriber.h"
+
 #if JUCE_WINDOWS
  #ifndef NOMINMAX
   #define NOMINMAX
@@ -161,13 +163,16 @@ struct Spectral
     }
 };
 
-struct Args { juce::File in, out, model; int threads = 0; };
+struct Args { juce::File in, out, model; int threads = 0; bool notesOnly = false; };
 
 bool parse(const juce::StringArray& argv, Args& a)
 {
-    for (int i = 1; i + 1 < argv.size(); i += 2)
+    for (int i = 1; i < argv.size(); i += 2)
     {
-        const juce::String k = argv[i], v = argv[i + 1];
+        const juce::String k = argv[i];
+        if (k == "--notes-only") { a.notesOnly = true; --i; continue; }
+        if (i + 1 >= argv.size()) return false;
+        const juce::String v = argv[i + 1];
         if (k == "--in") a.in = juce::File(v);
         else if (k == "--out") a.out = juce::File(v);
         else if (k == "--model") a.model = juce::File(v);
@@ -176,11 +181,72 @@ bool parse(const juce::StringArray& argv, Args& a)
     }
     if (a.model == juce::File())
         a.model = juce::File::getSpecialLocation(juce::File::currentExecutableFile).getSiblingFile("htdemucs.onnx");
-    return a.in != juce::File() && a.out != juce::File();
+    return a.out != juce::File() && (a.notesOnly || a.in != juce::File());
+}
+
+// --------------------------------------------------------------------------------------------
+// Notes (Basic Pitch, Spotify, Apache-2.0: third_party/basic_pitch) of the tonal stems -> notes.json.
+// The plug-in maps them through each pad (slice, key follow, pitch, stretch) into MAIN for HPDG.
+bool writeNotes(const juce::File& dir, int threads, double progressFrom, double progressTo)
+{
+    static const char* const tonal[] = { "bass", "vocals", "other" };
+    auto* stemsObj = new juce::DynamicObject();
+    juce::var stemsVar(stemsObj);
+    juce::WavAudioFormat wav;
+    double rate = 0.0;
+    int64_t frames = 0;
+    for (int t = 0; t < 3; ++t)
+    {
+        const auto f = dir.getChildFile(juce::String(tonal[t]) + ".wav");
+        std::unique_ptr<juce::AudioFormatReader> r(wav.createReaderFor(f.createInputStream().release(), true));
+        if (r == nullptr || r->lengthInSamples <= 0) { say("ERROR notes: cannot read " + f.getFullPathName()); return false; }
+        rate = r->sampleRate;
+        frames = r->lengthInSamples;
+        juce::AudioBuffer<float> b((int) juce::jmax(1u, r->numChannels), (int) frames);
+        r->read(&b, 0, (int) frames, 0, true, true);
+        std::vector<float> mono((size_t) frames);
+        for (int c = 0; c < b.getNumChannels(); ++c)
+            juce::FloatVectorOperations::addWithMultiply(mono.data(), b.getReadPointer(c), 1.0f / (float) b.getNumChannels(), (int) frames);
+        b.setSize(0, 0);
+        const auto audio = bbg::BasicPitchTranscriber::resampleTo22050(mono.data(), (int) frames, rate);
+        const auto bpFrames = bbg::BasicPitchTranscriber::infer(audio.data(), (int) audio.size(), juce::jmax(1, threads));
+        const auto notes = bbg::BasicPitchTranscriber::notes(bpFrames);
+        juce::Array<juce::var> list;
+        for (const auto& n : notes)
+        {
+            juce::Array<juce::var> one;
+            one.add(std::round(n.startSeconds * 10000.0) / 10000.0);
+            one.add(std::round(n.endSeconds * 10000.0) / 10000.0);
+            one.add(n.midi);
+            one.add(std::round(n.amplitude * 1000.0f) / 1000.0f);
+            list.add(one);
+        }
+        stemsObj->setProperty(tonal[t], list);
+        say("PROGRESS " + juce::String(progressFrom + (progressTo - progressFrom) * (t + 1) / 3.0, 3));
+    }
+    auto* o = new juce::DynamicObject();
+    o->setProperty("format", "hp.notes.v1");
+    o->setProperty("model", "basic-pitch");
+    o->setProperty("note", "[startSeconds, endSeconds, midi, amplitude] per stem, source time");
+    o->setProperty("sampleRate", rate);
+    o->setProperty("frames", (juce::int64) frames);
+    o->setProperty("stems", stemsVar);
+    const auto tmp = dir.getChildFile("notes.json.part");
+    if (!tmp.replaceWithText(juce::JSON::toString(juce::var(o), true))) { say("ERROR notes: cannot write " + tmp.getFullPathName()); return false; }
+    const auto fin = dir.getChildFile("notes.json");
+    fin.deleteFile();
+    return tmp.moveFileTo(fin);
 }
 
 int run(const Args& args)
 {
+    const int threads = args.threads > 0 ? args.threads : juce::jmax(1, juce::SystemStats::getNumPhysicalCpus());
+    if (args.notesOnly)
+    {
+        if (!writeNotes(args.out, threads, 0.05, 1.0)) return 5;
+        say("DONE");
+        return 0;
+    }
     if (!args.in.existsAsFile()) { say("ERROR input not found: " + args.in.getFullPathName()); return 2; }
     if (!args.model.existsAsFile()) { say("ERROR model not found: " + args.model.getFullPathName()); return 2; }
 
@@ -216,7 +282,7 @@ int run(const Args& args)
     // model
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "HPStems");
     Ort::SessionOptions so;
-    so.SetIntraOpNumThreads(args.threads > 0 ? args.threads : juce::jmax(1, juce::SystemStats::getNumPhysicalCpus()));
+    so.SetIntraOpNumThreads(threads);
     so.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
     Ort::Session session(env, args.model.getFullPathName().toWideCharPointer(), so);
     Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
@@ -270,7 +336,7 @@ int run(const Args& args)
                     dst[offset + i] += weight[(size_t) i] * y[(size_t) (trim + i)];
             }
         for (int64_t i = 0; i < len; ++i) sumWeight[(size_t) (offset + i)] += weight[(size_t) i];
-        say("PROGRESS " + juce::String(0.05 + 0.85 * (double) (s + 1) / (double) numSegments, 3));
+        say("PROGRESS " + juce::String(0.04 + 0.80 * (double) (s + 1) / (double) numSegments, 3));
     }
 
     // write
@@ -303,7 +369,7 @@ int run(const Args& args)
         fin.deleteFile();
         if (!tmp.moveFileTo(fin)) { say("ERROR cannot write " + fin.getFullPathName()); return 3; }
         written.add(fin);
-        say("PROGRESS " + juce::String(0.9 + 0.025 * (src + 1), 3));
+        say("PROGRESS " + juce::String(0.84 + 0.015 * (src + 1), 3));
     }
 
     auto* o = new juce::DynamicObject();
@@ -315,6 +381,8 @@ int run(const Args& args)
     for (auto* s : kSourceNames) names.add(juce::String(s));
     o->setProperty("stems", names);
     args.out.getChildFile("stems.json").replaceWithText(juce::JSON::toString(juce::var(o)));
+    // notes are a bonus: the stems stand without them (the plug-in can ask again with --notes-only)
+    if (!writeNotes(args.out, threads, 0.90, 1.0)) say("WARN notes failed");
     say("DONE");
     return 0;
 }
@@ -339,7 +407,7 @@ int main(int argc, char** argv)
     Args args;
     if (!parse(argList, args))
     {
-        say("ERROR usage: HPStems --in <input.wav> --out <dir> [--model <htdemucs.onnx>] [--threads N]");
+        say("ERROR usage: HPStems --in <input.wav> --out <dir> [--model <htdemucs.onnx>] [--threads N] | --notes-only --out <dir>");
         return 1;
     }
     try { return run(args); }

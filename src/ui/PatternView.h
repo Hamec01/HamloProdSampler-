@@ -34,6 +34,7 @@ public:
     void resized() override { layoutKnobs(); }
     void layoutKnobs();   // the lane mix knobs follow the lane rectangles (drum guide on / off)
     void updateKnobs();   // values from the project
+    void updateBass();    // the bass line MAIN sends to HPDG (from the stems), recomputed when the project changed
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
     void mouseUp(const juce::MouseEvent&) override;
@@ -48,7 +49,11 @@ public:
     bool isInterestedInFileDrag(const juce::StringArray&) override { return true; }
     void filesDropped(const juce::StringArray& files, int x, int y) override;
 
-    static constexpr int kLabelW = 210, kNavH = 14, kRulerH = 40, kGuideH = 16, kVelH = 58;
+    static constexpr int kLabelW = 210, kNavH = 14, kRulerH = 40, kGuideH = 16, kVelH = 58, kBassH = 26;
+    std::vector<hpbridge::BassNoteDto> bassNotes; // MAIN ticks, project pitch
+    uint64_t bassRevision = 0;
+    int bassStripY() const;                       // top of the BASS -> HPDG strip (shown when bassNotes exist)
+    void drawBass(juce::Graphics&, int64_t loop);
     struct Row { int src; int pad; int y, h; };   // pad -1 = whole source lane / a source without pads
     std::vector<Row> rows() const;
     juce::Rectangle<int> notesArea() const;       // rows only (no overview / ruler / guide / velocity)

@@ -144,6 +144,17 @@ struct ContextStep
     float bassConfidence = 0, confidence = 0;
 };
 
+// Optional (HPSAMPLER with stems): the bass line MAIN plays, transcribed from the sources' BASS stems and
+// mapped through the pads (slice, key follow, pitch, stretch, cuts). MAIN ticks, project pitch.
+struct BassNoteDto
+{
+    int64_t startTick   = 0;
+    int64_t lengthTicks = 0;
+    int     midi        = -1;
+    float   velocity    = 0.0f;
+    float   confidence  = 0.0f;
+};
+
 struct SamplerContextSnapshot
 {
     juce::String schema = kSamplerContextSchemaV1;
@@ -168,6 +179,7 @@ struct SamplerContextSnapshot
     LowEndDto                      lowEnd;
     int featureVersion = 0; // 0 = legacy peer, 1 = source feature projection
     std::vector<ContextStep> features;
+    std::vector<BassNoteDto> bassNotes; // empty = not known (no stems)
 
     int          algorithmVersion = 1;
     juce::String unknownPolicy    = "null";
