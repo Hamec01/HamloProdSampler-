@@ -55,6 +55,7 @@ add_library(HPSAMPLER_Core STATIC
     src/render/PadRenderer.cpp
     src/audio/Engine.cpp
     src/bridge/BridgeAdapter.cpp
+    src/stems/Stems.cpp
 )
 target_include_directories(HPSAMPLER_Core PUBLIC src third_party/signalsmith-stretch/include third_party/signalsmith-linear/include)
 target_link_libraries(HPSAMPLER_Core
@@ -100,6 +101,7 @@ target_sources(HPSAMPLER PRIVATE
     src/ui/PadGrid.cpp
     src/ui/ControlStrip.cpp
     src/ui/PadInspector.cpp
+    src/ui/StemStrip.cpp
 )
 juce_add_binary_data(HPSAMPLER_Assets SOURCES assets/hamloprod_logo_white.png)
 
@@ -144,3 +146,45 @@ target_compile_definitions(HPSAMPLER_HostCheck PRIVATE JUCE_MODAL_LOOPS_PERMITTE
 add_executable(HPSAMPLER_RawVst3Check tools/RawVst3Check.cpp
     ${HPSAMPLER_JUCE_DIR}/modules/juce_audio_processors_headless/format_types/VST3_SDK/pluginterfaces/base/funknown.cpp)
 target_include_directories(HPSAMPLER_RawVst3Check PRIVATE ${HPSAMPLER_JUCE_DIR}/modules/juce_audio_processors_headless/format_types/VST3_SDK)
+
+# ----------------------------------------------------------------------------
+# HPStems — stem separation helper (separate process; HTDemucs v4 via ONNX Runtime, CPU)
+# The plug-in never loads ONNX Runtime itself. Ship HPStems.exe + onnxruntime*.dll + htdemucs.onnx
+# together (see docs/STEMS.md; the model comes from tools/stems/export_htdemucs_onnx.py).
+# ----------------------------------------------------------------------------
+set(HPSAMPLER_ORT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime")
+if (EXISTS "${HPSAMPLER_ORT_DIR}/include/onnxruntime_cxx_api.h")
+    add_executable(HPStems stems_helper/HPStems.cpp)
+    target_include_directories(HPStems PRIVATE "${HPSAMPLER_ORT_DIR}/include")
+    target_link_libraries(HPStems PRIVATE "${HPSAMPLER_ORT_DIR}/lib/onnxruntime.lib" juce::juce_audio_formats juce::juce_dsp juce::juce_recommended_config_flags shell32)
+    target_compile_definitions(HPStems PRIVATE JUCE_STANDALONE_APPLICATION=1 JUCE_USE_CURL=0 JUCE_WEB_BROWSER=0)
+    add_custom_command(TARGET HPStems POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${HPSAMPLER_ORT_DIR}/lib/onnxruntime.dll" "${HPSAMPLER_ORT_DIR}/lib/onnxruntime_providers_shared.dll" "$<TARGET_FILE_DIR:HPStems>")
+
+    # The engine travels inside the plug-in: HPSAMPLER.vst3/Contents/x86_64-win/HPStems/ (and next to the
+    # standalone exe), where StemSeparator::helperExe() looks first. The HUB installs / rolls back / removes it
+    # together with the plug-in. Model: third_party/htdemucs/htdemucs.onnx (fp16-stored, lossless, ~86 MB).
+    set(HPSAMPLER_STEMS_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/third_party/htdemucs/htdemucs.onnx" CACHE FILEPATH "HTDemucs ONNX model for HPStems")
+    option(HPSAMPLER_BUNDLE_STEMS "Put the stem engine (HPStems + model) into the plug-in bundle" ON)
+    if (HPSAMPLER_BUNDLE_STEMS AND EXISTS "${HPSAMPLER_STEMS_MODEL}")
+        foreach (fmt VST3 Standalone)
+            add_dependencies(HPSAMPLER_${fmt} HPStems)
+            add_custom_command(TARGET HPSAMPLER_${fmt} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:HPSAMPLER_${fmt}>/HPStems"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:HPStems>" "${HPSAMPLER_ORT_DIR}/lib/onnxruntime.dll"
+                        "${HPSAMPLER_ORT_DIR}/lib/onnxruntime_providers_shared.dll" "${HPSAMPLER_STEMS_MODEL}"
+                        "$<TARGET_FILE_DIR:HPSAMPLER_${fmt}>/HPStems"
+                COMMENT "HPSAMPLER ${fmt}: bundling the stem engine")
+        endforeach()
+    else()
+        message(STATUS "HPSAMPLER: stem engine not bundled (model missing: ${HPSAMPLER_STEMS_MODEL})")
+    endif()
+else()
+    message(STATUS "HPStems skipped: ONNX Runtime not found in ${HPSAMPLER_ORT_DIR}")
+endif()
+
+# Stem feature end to end on the real processor (needs the installed HPStems engine; not shipped)
+add_executable(HPSAMPLER_StemsCheck WIN32 tools/StemsCheck.cpp)
+target_link_libraries(HPSAMPLER_StemsCheck PRIVATE HPSAMPLER HPSAMPLER_Core juce::juce_audio_utils)
+target_compile_definitions(HPSAMPLER_StemsCheck PRIVATE JUCE_STANDALONE_APPLICATION=1)
+target_include_directories(HPSAMPLER_StemsCheck PRIVATE src)

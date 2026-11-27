@@ -16,6 +16,9 @@ inline constexpr int kPPQ          = 960;
 inline constexpr int kTicksPerBar  = kPPQ * 4; // 4/4 in v1
 inline constexpr int kBaseMidiNote = 36;       // C1 = bank A pad 1
 inline constexpr int kMaxChokeGroups = 8;
+inline constexpr int kNumStems     = 4;        // DRUMS, BASS, VOX, INST (HTDemucs drums / bass / vocals / other)
+inline constexpr float kStemMinDb  = -60.0f;   // at or below: the stem is off
+inline constexpr float kStemMaxDb  = 12.0f;
 
 // How a pad reacts to NoteOn / NoteOff.
 enum class PlayMode : int { Gate = 0, OneShot = 1, Toggle = 2 };

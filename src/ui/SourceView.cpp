@@ -777,6 +777,7 @@ SourceView::SourceView(HPSamplerProcessor& p) : proc(p)
 {
     setWantsKeyboardFocus(true);
     addAndMakeVisible(canvas);
+    addAndMakeVisible(stemStrip);
     for (auto* b : { &loadBtn, &clearBtn, &anchorBtn, &bpmBtn, &keyBtn, &halfBtn, &doubleBtn, &waveBtn, &specBtn, &splitBtn,
                      &runBtn, &mapBtn, &acceptBtn, &clearCandBtn, &sMinus, &sPlus, &eMinus, &ePlus, &zoomSelBtn, &zoomAllBtn,
                      &loopBtn, &autoBtn, &assignBtn, &assignModeBtn, &tapBtn, &gridBtn, &hearBtn, &cutBtn, &mapMenuBtn })
@@ -1006,11 +1007,13 @@ void SourceView::setSlot(int s)
     if (tapArmed) finishTap(false);
     slot = juce::jlimit(0, kNumSources - 1, s);
     markFrame = -1;
+    stemStrip.setSlot(slot);
     refresh();
 }
 
 void SourceView::refresh()
 {
+    stemStrip.refresh();
     if (const int pad = editingPad(); pad >= 0)
     {
         const auto& p = proc.project.state().pads[(size_t) pad];
@@ -1206,6 +1209,10 @@ void SourceView::resized()
     splitBtn.setBounds(top.removeFromRight(54).reduced(2));
     specBtn.setBounds(top.removeFromRight(50).reduced(2));
     waveBtn.setBounds(top.removeFromRight(54).reduced(2));
+    // stems: the free space between ANCHOR and WAVE (power + 4 cells), centred
+    top.reduce(6, 0);
+    stemStrip.setBounds(top.withSizeKeepingCentre(juce::jmin(top.getWidth(), 22 + 3 + 4 * 46 + 3 * 4), top.getHeight()));
+    stemStrip.setVisible(top.getWidth() >= 120);
     auto infoRow = r.removeFromTop(22);
     hearBtn.setBounds(infoRow.removeFromRight(160).reduced(2, 1));
     gridBtn.setBounds(infoRow.removeFromRight(58).reduced(2, 1));

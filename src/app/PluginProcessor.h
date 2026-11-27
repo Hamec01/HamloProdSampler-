@@ -10,6 +10,7 @@
 #include "hpbridge/BridgeSession.h"
 #include "core/Project.h"
 #include "render/PadRenderer.h"
+#include "stems/Stems.h"
 
 namespace hps
 {
@@ -171,6 +172,16 @@ public:
     bool linkHpdgGuide(const hpbridge::BridgePeerInfo& peer, juce::String& error);
     void unlinkGuide();
 
+    // stems (optional, HPStems.exe): DRUMS / BASS / VOX / INST, rebalanced with SourceSlot::stemDb
+    StemSeparator stems;
+    bool stemEngineInstalled() const { return StemSeparator::helperExe() != juce::File(); }
+    bool stemsCached(int slot) const;           // a previous split of this exact file is on disk
+    double stemEstimateSeconds(int slot) const; // rough CPU time of a split
+    void startStems(int slot);                  // after the user agreed to the warning
+    void loadCachedStems(int slot);
+    void cancelStems(int slot);
+    void deleteStems(int slot);                 // drops the cache and goes back to the original
+
     // status line
     juce::String status;
     void setStatus(const juce::String& s);
@@ -218,5 +229,14 @@ private:
     void updateBridgeName();
     juce::String bridgeName;
     std::array<bool, kNumSources> restoredSlot {}; // restored from DAW state: never auto-anchor
+    // stems: the decoded source as loaded; the project's store holds the rebalanced copy while a mix is on
+    std::array<std::shared_ptr<const SourceData>, kNumSources> originalData;
+    std::array<uint64_t, kNumSources> stemMixApplied {}; // 0 = the original is published
+    std::array<bool, kNumSources> stemMixBusy {};
+    uint64_t stemMixKey(int slot) const;
+    void updateStemMix(int slot);
+    void stemsChanged(int slot);
+    juce::ThreadPool stemMixPool { juce::ThreadPoolOptions {}.withThreadName("HPSAMPLER stem mix").withNumberOfThreads(1)
+                                       .withDesiredThreadPriority(juce::Thread::Priority::low) };
 };
 } // namespace hps

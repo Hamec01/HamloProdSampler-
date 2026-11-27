@@ -33,6 +33,16 @@ struct SourceSlot
     float  pan = 0.0f;
     float  lowCutHz = 20.0f;     // high-pass of the lane (20 = off)
     float  highCutHz = 20000.0f; // low-pass of the lane (20000 = off)
+    // stem rebalance (only heard once the stems exist; DRUMS, BASS, VOX, INST)
+    std::array<float, kNumStems> stemDb {};
+    std::array<bool, kNumStems>  stemMute {};
+    bool   stemsOn = true;       // false = A/B: the original is heard, the mix is kept
+    bool stemMixIsUnity() const noexcept
+    {
+        if (!stemsOn) return true;
+        for (int i = 0; i < kNumStems; ++i) if (stemMute[(size_t) i] || std::abs(stemDb[(size_t) i]) > 0.01f) return false;
+        return true;
+    }
 
     bool empty() const noexcept { return id.isEmpty(); }
 };

@@ -29,3 +29,9 @@ The script builds both formats and checks that the resulting files exist. It use
 of an existing `build/` folder, selects x64 for a fresh folder, and returns a nonzero exit code on
 failure. `nopause` is intended for terminals and automation. Installation into the system VST3
 folder is a separate step.
+
+## Stems engine (optional)
+
+`build.bat` also builds `build/Release/HPStems.exe` (stem separation helper, ONNX Runtime from
+`third_party/onnxruntime`). It needs the model `htdemucs.onnx` next to it; see `docs/STEMS.md` for
+exporting the model and where the plug-in looks for the engine (e.g. `Documents\HamloProd\HPSAMPLER\HPStems`).

@@ -16,7 +16,14 @@ HPSamplerProcessor::HPSamplerProcessor()
     loader.onResult = [this](int slot, std::shared_ptr<const SourceData> data, bool analysed)
     {
         if (project.state().sources[(size_t) slot].id != data->id) return; // replaced meanwhile
+        if (stems.sourceIdOf(slot).isNotEmpty() && stems.sourceIdOf(slot) != data->id) stems.forget(slot);
+        originalData[(size_t) slot] = data;
+        stemMixApplied[(size_t) slot] = 0;
         project.setSourceData(data);
+        if (analysed && stems.state(slot) == StemSeparator::State::None && !project.state().sources[(size_t) slot].stemMixIsUnity()
+            && stemsCached(slot))
+            loadCachedStems(slot); // the project was saved with a stem mix: bring it back
+        updateStemMix(slot);
         loading[(size_t) slot] = !analysed;
         if (!analysed) { setStatus("SRC " + juce::String(slot + 1) + ": waveform ready, analysing tempo / key..."); return; }
 
@@ -76,6 +83,7 @@ HPSamplerProcessor::HPSamplerProcessor()
         engine.publishPadSound(pad, std::move(s));
         listeners.call([](Listener& l) { l.statusChanged(); });
     };
+    stems.onChanged = [this](int slot) { stemsChanged(slot); };
     session = std::make_unique<hpbridge::BridgeSession>(hpbridge::PeerType::Sampler, "HPSAMPLER");
     session->onStateChanged = [this]
     {
@@ -106,6 +114,7 @@ HPSamplerProcessor::~HPSamplerProcessor()
     stopTimer();
     *alive = false;
     contextPool.removeAllJobs(true, 20000);
+    stemMixPool.removeAllJobs(true, 20000);
     session.reset(); // closes the slot: a connected HPDG shows Disconnected
 }
 
@@ -163,6 +172,7 @@ void HPSamplerProcessor::onProjectChanged()
     ++contextGeneration;
     contextDirty = true;
     lastProjectChangeMs = juce::Time::getMillisecondCounter();
+    for (int i = 0; i < kNumSources; ++i) updateStemMix(i); // undo / redo of a stem level lands here too
     syncEngine();
     listeners.call([](Listener& l) { l.projectChanged(); });
 }
@@ -354,6 +364,9 @@ void HPSamplerProcessor::loadSource(int slot, const juce::File& file)
         if (s.settings.anchorSrc == slot) s.settings.anchorSrc = -1;
     });
     ui.src[(size_t) slot] = UiState::SrcView {};
+    stems.forget(slot);
+    originalData[(size_t) slot] = nullptr;
+    stemMixApplied[(size_t) slot] = 0;
     loading[(size_t) slot] = true;
     restoredSlot[(size_t) slot] = false;
     setStatus("SRC " + juce::String(slot + 1) + ": loading " + file.getFileName() + "...");
@@ -374,6 +387,126 @@ void HPSamplerProcessor::clearSource(int slot)
         if (s.settings.anchorSrc == slot) s.settings.anchorSrc = -1;
     });
     ui.src[(size_t) slot] = UiState::SrcView {};
+    stems.forget(slot);
+    originalData[(size_t) slot] = nullptr;
+    stemMixApplied[(size_t) slot] = 0;
+}
+
+// --------------------------------------------------------------------------------------------
+// stems
+
+bool HPSamplerProcessor::stemsCached(int slot) const
+{
+    const auto d = originalData[(size_t) slot];
+    if (d == nullptr) return false;
+    return StemSeparator::hasCache(StemSeparator::cacheDirFor(project.state().sources[(size_t) slot], *d));
+}
+
+double HPSamplerProcessor::stemEstimateSeconds(int slot) const
+{
+    const auto d = originalData[(size_t) slot];
+    if (d == nullptr || d->sampleRate <= 0) return 0.0;
+    const double seconds = (double) d->numFrames / d->sampleRate;
+    const int cores = juce::jmax(1, juce::SystemStats::getNumPhysicalCpus() - 1);
+    // measured: ~0.6 s per second of audio on 7 cores (HTDemucs, ONNX Runtime, CPU), plus loading the model
+    return 5.0 + seconds * 0.6 * 7.0 / (double) cores * (std::abs(d->sampleRate - 44100.0) > 1.0 ? 1.15 : 1.0);
+}
+
+void HPSamplerProcessor::startStems(int slot)
+{
+    const auto d = originalData[(size_t) slot];
+    if (d == nullptr) return;
+    stems.separate(slot, d, StemSeparator::cacheDirFor(project.state().sources[(size_t) slot], *d));
+    setStatus("SRC " + juce::String(slot + 1) + ": splitting into stems (HPStems, background)...");
+}
+
+void HPSamplerProcessor::loadCachedStems(int slot)
+{
+    const auto d = originalData[(size_t) slot];
+    if (d == nullptr) return;
+    stems.load(slot, d, StemSeparator::cacheDirFor(project.state().sources[(size_t) slot], *d));
+}
+
+void HPSamplerProcessor::cancelStems(int slot)
+{
+    stems.cancel(slot);
+    setStatus("SRC " + juce::String(slot + 1) + ": stem split cancelled");
+}
+
+void HPSamplerProcessor::deleteStems(int slot)
+{
+    const auto d = originalData[(size_t) slot];
+    stems.forget(slot);
+    if (d != nullptr) StemSeparator::cacheDirFor(project.state().sources[(size_t) slot], *d).deleteRecursively();
+    updateStemMix(slot);
+    setStatus("SRC " + juce::String(slot + 1) + ": stems deleted, the original is heard");
+    listeners.call([](Listener& l) { l.projectChanged(); });
+}
+
+uint64_t HPSamplerProcessor::stemMixKey(int slot) const
+{
+    const auto set = stems.stems(slot);
+    const auto orig = originalData[(size_t) slot];
+    const auto& src = project.state().sources[(size_t) slot];
+    if (set == nullptr || orig == nullptr || set->sourceId != orig->id || src.id != orig->id || src.stemMixIsUnity()) return 0;
+    uint64_t h = 1469598103934665603ull;
+    auto mix = [&h](uint64_t v) { h ^= v; h *= 1099511628211ull; };
+    mix((uint64_t) reinterpret_cast<uintptr_t>(set.get()));
+    mix((uint64_t) reinterpret_cast<uintptr_t>(orig.get()));
+    for (int k = 0; k < kNumStems; ++k)
+    {
+        mix((uint64_t) juce::roundToInt(src.stemDb[(size_t) k] * 100.0f) + 100000u);
+        mix(src.stemMute[(size_t) k] ? 7u : 3u);
+    }
+    return h == 0 ? 1 : h;
+}
+
+void HPSamplerProcessor::updateStemMix(int slot)
+{
+    const auto orig = originalData[(size_t) slot];
+    if (orig == nullptr) return;
+    const uint64_t want = stemMixKey(slot);
+    if (want == stemMixApplied[(size_t) slot] || stemMixBusy[(size_t) slot]) return; // a running mix re-checks when done
+    if (want == 0)
+    {
+        stemMixApplied[(size_t) slot] = 0;
+        if (project.sourceDataForSlot(slot) != orig) project.setSourceData(orig);
+        return;
+    }
+    stemMixBusy[(size_t) slot] = true;
+    stemMixPool.addJob([this, flag = alive, slot, want, orig, set = stems.stems(slot), src = project.state().sources[(size_t) slot]]()
+    {
+        if (!*flag) return;
+        auto d = std::make_shared<SourceData>(*orig);
+        auto buf = mixStems(*set, src, orig->numFrames);
+        d->peaks = SourceAnalyzer::computePeaks(*buf, orig->peaks.framesPerPeak);
+        d->audio = std::move(buf);
+        std::shared_ptr<const SourceData> ready = std::move(d);
+        juce::MessageManager::callAsync([this, flag, slot, want, orig, ready]
+        {
+            if (!*flag) return;
+            stemMixBusy[(size_t) slot] = false;
+            if (originalData[(size_t) slot] == orig && stemMixKey(slot) == want)
+            {
+                stemMixApplied[(size_t) slot] = want;
+                project.setSourceData(ready);
+            }
+            else updateStemMix(slot); // the levels moved on meanwhile
+        });
+    });
+}
+
+void HPSamplerProcessor::stemsChanged(int slot)
+{
+    using S = StemSeparator::State;
+    const auto st = stems.state(slot);
+    if (st == S::Ready)
+    {
+        if (!stemMixBusy[(size_t) slot] && stemMixApplied[(size_t) slot] == 0 && project.state().sources[(size_t) slot].stemMixIsUnity())
+            setStatus("SRC " + juce::String(slot + 1) + ": stems ready - DRUMS / BASS / VOX / INST. Drag a cell up / down = level, click = mute, double-click = 0 dB.");
+        updateStemMix(slot);
+    }
+    else if (st == S::Failed) setStatus("SRC " + juce::String(slot + 1) + ": stems failed - " + stems.error(slot));
 }
 
 // --------------------------------------------------------------------------------------------

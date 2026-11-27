@@ -94,6 +94,11 @@ juce::String Serialization::toJson(const ProjectState& s)
         o->setProperty("pan", src.pan);
         o->setProperty("lowCutHz", src.lowCutHz);
         o->setProperty("highCutHz", src.highCutHz);
+        juce::Array<juce::var> stemDb, stemMute;
+        for (int k = 0; k < kNumStems; ++k) { stemDb.add(src.stemDb[(size_t) k]); stemMute.add(src.stemMute[(size_t) k]); }
+        o->setProperty("stemDb", stemDb);
+        o->setProperty("stemMute", stemMute);
+        o->setProperty("stemsOn", src.stemsOn);
         sources.add(juce::var(o));
     }
     root->setProperty("sources", sources);
@@ -199,6 +204,12 @@ bool Serialization::fromJson(const juce::String& json, ProjectState& out, juce::
             filterKnobToHz(juce::jlimit(-1.0f, 1.0f, get(o, "filter", 0.0f)), hp, lp);
             src.lowCutHz = juce::jlimit(20.0f, 2000.0f, get(o, "lowCutHz", hp));
             src.highCutHz = juce::jlimit(500.0f, 20000.0f, get(o, "highCutHz", lp));
+            if (auto* a = o["stemDb"].getArray())
+                for (int k = 0; k < juce::jmin(kNumStems, a->size()); ++k)
+                    src.stemDb[(size_t) k] = juce::jlimit(kStemMinDb, kStemMaxDb, (float) (double) a->getReference(k));
+            if (auto* a = o["stemMute"].getArray())
+                for (int k = 0; k < juce::jmin(kNumStems, a->size()); ++k) src.stemMute[(size_t) k] = (bool) a->getReference(k);
+            src.stemsOn = get(o, "stemsOn", true);
         }
     if (auto* arr = v["slices"].getArray())
         for (const auto& o : *arr)

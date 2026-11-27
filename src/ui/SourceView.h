@@ -1,6 +1,7 @@
 #pragma once
 
 #include "app/PluginProcessor.h"
+#include "ui/StemStrip.h"
 #include "ui/Theme.h"
 
 namespace hps
@@ -123,6 +124,7 @@ private:
     juce::TextButton bpmBtn, keyBtn, halfBtn { "/2" }, doubleBtn { "x2" };
     juce::TextButton waveBtn { "WAVE" }, specBtn { "SPEC" }, splitBtn { "SPLIT" };
     juce::Label title, info;
+    StemStrip stemStrip { proc };
 
     // chop toolbar
     juce::ComboBox toolBox, focusBox;

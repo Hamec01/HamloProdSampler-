@@ -1,1 +1,4 @@
 build.bat text eol=crlf
+*.onnx binary
+*.dll binary
+*.lib binary

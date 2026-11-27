@@ -70,7 +70,7 @@ cmake -S "%PROJECT_DIR%" -B "%BUILD_DIR%" "-DHPSAMPLER_JUCE_DIR=%JUCE_ROOT%"
 if errorlevel 1 goto :failed
 
 :build
-cmake --build "%BUILD_DIR%" --config %CONFIG% --target HPSAMPLER_VST3 HPSAMPLER_Standalone --parallel 4
+cmake --build "%BUILD_DIR%" --config %CONFIG% --target HPSAMPLER_VST3 HPSAMPLER_Standalone HPStems --parallel 4
 if errorlevel 1 goto :failed
 if not exist "%BUILD_DIR%\HPSAMPLER_artefacts\%CONFIG%\VST3\HPSAMPLER.vst3\Contents\x86_64-win\HPSAMPLER.vst3" goto :failed
 if not exist "%BUILD_DIR%\HPSAMPLER_artefacts\%CONFIG%\Standalone\HPSAMPLER.exe" goto :failed
