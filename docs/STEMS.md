@@ -49,6 +49,10 @@ they live in a disk cache and come back on their own when a project with a stem 
   - new optional `bassNotes`: `[startTick, lengthTicks, midi, velocity, confidence]`, the exact MAIN bass line.
     Older peers ignore it.
   - A muted / off BASS stem sends no bass from that source.
+* How HPDG uses it (owner, 2026-11-28): HPDG composes **its own** bass knowing these notes (roots, chord tones,
+  scale, where the sample bass plays or leaves room). It does not replay them note for note. An exact copy
+  belongs only to HPDG's Copy Break modes ("Bass Only", "K/S/H + Bass"), where `bassNotes` can stand in for
+  HPDG's own BassStemTranscriber.
 * MAIN shows the line as the strip "BASS -> HPDG" under the drum guide.
 * Checked: `tools/stems/bass_truth_test.py` (a mix with a known bass line: 71/72 notes exact after split +
   transcription) and `HPSAMPLER_BassCheck <dir>` (end to end: 10/10 notes at +2 st key follow and +7 st with pad pitch,
